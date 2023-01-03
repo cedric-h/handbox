@@ -1,3 +1,5 @@
+<!-- vim: sw=2 ts=2 expandtab smartindent ft=javascript
+-->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -21,22 +23,44 @@
 <body>
   <canvas id="draw"></canvas>
   <script>
-/* "with great power, comes great renamability" - max wofford */
-
 (async () => {
   const wasm = fetch("build/main.wasm");
   const { instance } =
     await WebAssembly.instantiateStreaming(wasm, { env: {
       print: console.log,
       cosf: Math.cos,
+      fmodf: (l, r) => l % r,
       sinf: Math.sin,
       sqrtf: Math.sqrt,
+      atan2f: Math.atan2,
+
+      local_save: (buf_ptr, buf_len) => {
+        const mem = instance.exports.memory.buffer;
+
+        const bytes = new Uint8Array(mem, buf_ptr, buf_len);
+        window
+          .localStorage
+          .setItem("handbox", bytes.reduce((a, x) => a + String.fromCharCode(x), ''));
+      },
+      local_load: (buf_ptr, buf_len) => {
+        const mem = instance.exports.memory.buffer;
+
+        new Uint8Array(mem, buf_ptr, buf_len).set(
+          new Uint8Array(
+            window
+              .localStorage
+              .getItem("handbox")
+              .split('')
+              .slice(0, buf_len)
+              .map(x => x.charCodeAt(0))
+          )
+        );
+      }
     } });
 
   const canvas = document.getElementById("draw");
   const ctx = canvas.getContext("2d", { alpha: false });
-  canvas.width = 256;
-  canvas.height = 256;
+  canvas.width = canvas.height = 256;
 
   let img;
   (window.onresize = () => {
@@ -58,6 +82,10 @@
     );
     img = new ImageData(screen, canvas.width, canvas.height);
   })();
+
+  canvas.onmousemove = ev => instance.exports.mousemove(ev.offsetX, ev.offsetY);
+  canvas.onmousedown = ev => instance.exports.mousedown(ev.offsetX, ev.offsetY);
+  canvas.onmouseup   = ev => instance.exports.mouseup  (ev.offsetX, ev.offsetY);
 
   (function frame(dt) {
     instance.exports.draw(dt * 0.001);
