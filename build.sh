@@ -16,6 +16,7 @@ cd build
    -Wl,--allow-undefined \
    -Wall \
    -mbulk-memory \
+   -gdwarf \
    -o main.wasm \
    ../main.c
 

@@ -66,7 +66,7 @@
   (window.onresize = () => {
     const w = window.innerWidth;
     const h = window.innerHeight;
-    const scale = Math.min(w/16, h/9);
+    const scale = Math.floor(Math.min(w/16, h/9));
     canvas.width = scale*16;
     canvas.height = scale*9;
 

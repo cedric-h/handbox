@@ -298,12 +298,20 @@ static void screen_to_world(float *x, float *y) {
 /* -- END RENDER -- */
 
 /* cuz if you\'re board, then you\'re boring */
-typedef enum { BoardStage_Uninit, BoardStage_Init, BoardStage_Sticky } BoardStage;
+typedef enum {
+  BoardStage_Uninit,
+  BoardStage_Init,
+  BoardStage_Sticky,
+  BoardStage_Fading,
+} BoardStage;
 typedef struct Board Board;
 struct Board {
-  Board *next, *prev;
+  Board *next, *head;
 
   BoardStage stage;
+
+  uint32_t tick_stage_start,
+           tick_stage_end;
 
   float beg_x, beg_y,
         end_x, end_y;
@@ -314,6 +322,7 @@ static Board *board_at_index(int32_t);
 
 
 typedef enum {
+  HandStage_Uninit,
   HandStage_Init,
   HandStage_Grab,
   HandStage_Bring,
@@ -327,6 +336,8 @@ typedef struct {
 
   float x, y;
 
+  float angle_grab, angle_release;
+
   uint32_t tick_stage_start,
            tick_stage_end;
 
@@ -335,18 +346,17 @@ typedef struct {
 typedef struct {
   float theta, grip_width;
   float x, y;
+  float angle_grab, angle_release;
 } HandOut;
 
-struct { float offset, width; } ARC = {
-  .offset = (MATH_PI*2)/3,
-  .width = MATH_PI*0.9f,
-};
 float GRIP_WIDTH_GRAB = MATH_PI*0.25f;
 float GRIP_WIDTH_RELEASE = MATH_PI*0.8f;
 
 static void hand_out(Hand *hand, uint32_t tick, HandOut *out) {
   out->x = hand->x;
   out->y = hand->y;
+  out->angle_grab = hand->angle_grab;
+  out->angle_release = hand->angle_release;
 
   float duration = hand->tick_stage_end - hand->tick_stage_start;
   float elapsed = tick - hand->tick_stage_start;
@@ -354,22 +364,29 @@ static void hand_out(Hand *hand, uint32_t tick, HandOut *out) {
   if (t < 0) t = 0;
   if (t > 1) t = 1;
   switch (hand->stage) {
+    case (HandStage_Uninit): {} break;
+
     case (HandStage_Init): {
       hand->stage = HandStage_Grab;
       hand->grabbed_board = -1;
-      out->theta = ARC.offset + ARC.width/-2;
+      out->theta = hand->angle_grab;
       hand->tick_stage_start = tick;
       hand->tick_stage_end   = tick + TICK_SECOND;
+
+      float arc_offset = (MATH_PI*2)/3;
+      float arc_width = MATH_PI*0.9f;
+      hand->angle_grab    = arc_offset + arc_width/-2;
+      hand->angle_release = arc_offset + arc_width/ 2;
     } break;
 
     case (HandStage_Frozen): {
-      out->theta = ARC.offset + ARC.width/-2;
+      out->theta = hand->angle_grab;
       out->grip_width = GRIP_WIDTH_GRAB;
     } break;
 
     case (HandStage_Grab): {
       // t = ease_out_quad(t);
-      out->theta = ARC.offset + ARC.width/-2;
+      out->theta = hand->angle_grab;
       out->grip_width = lerp_rads(GRIP_WIDTH_RELEASE, GRIP_WIDTH_GRAB, t);
 
       if (elapsed < (duration + TICK_SECOND*0.2f)) break;
@@ -388,7 +405,7 @@ static void hand_out(Hand *hand, uint32_t tick, HandOut *out) {
 
     case (HandStage_Bring): {
       t = ease_out_quad(t);
-      out->theta = ARC.offset + lerp_rads(ARC.width/-2, ARC.width/2, t);
+      out->theta = lerp_rads(hand->angle_grab, hand->angle_release, t);
       out->grip_width = GRIP_WIDTH_GRAB;
 
       if (t < 1) break;
@@ -400,7 +417,7 @@ static void hand_out(Hand *hand, uint32_t tick, HandOut *out) {
     case (HandStage_Release): {
       // t = ease_out_quad(t);
       out->grip_width = lerp_rads(GRIP_WIDTH_GRAB, GRIP_WIDTH_RELEASE, t);
-      out->theta = ARC.offset + ARC.width/2;
+      out->theta = hand->angle_release;
 
       if (elapsed < (duration + TICK_SECOND*0.2f)) break;
       if (hand->grabbed_board > -1)
@@ -413,7 +430,7 @@ static void hand_out(Hand *hand, uint32_t tick, HandOut *out) {
 
     case (HandStage_Return): {
       t = ease_out_quad(t);
-      out->theta = ARC.offset + lerp_rads(ARC.width/2, ARC.width/-2, t);
+      out->theta = lerp_rads(hand->angle_release, hand->angle_grab, t);
       out->grip_width = GRIP_WIDTH_RELEASE;
 
       if (t < 1) break;
@@ -529,23 +546,31 @@ typedef struct {
 } House;
 
 typedef enum {
+  ToolKind_WoodDispenser,
+  ToolKind_Hand,
+} ToolKind;
+
+typedef enum {
   Mode_View,
-  Mode_HandTweak,
+  Mode_HandView,
+  Mode_HandMoveAngleGrab,
+  Mode_HandMoveAngleRelease,
   Mode_HandMove,
   Mode_BuyPreview,
 } Mode;
 static struct { 
   uint32_t tick, tick_last_click;
-  Mode mode;
-  /* for Mode_Hand* */ Hand *hand_selected;
-  WoodDispenser wood_dispensers[1 << 4];
-
   TutorialStage tutorial_stage;
 
-  Hand hand;
-  Board boards[1 << 5];
+  Mode mode;
+  /* for Mode_Hand*         */ Hand *hand_selected;
+  /* for Mode_BuyPreview    */ ToolKind preview_tool_kind;
 
+  WoodDispenser wood_dispensers[1 << 4];
+  Hand hands[1 << 4];
+  Board boards[1 << 5];
   House house;
+
 } state = {0};
 
 static struct {
@@ -576,20 +601,19 @@ static void tutorial(void) {
       }
       state.house = state.boards;
 #else 
-      state.hand.x = hand_ideal_x*0.6f;
-      state.hand.y = ty;
+      state.hands[0].stage = HandStage_Init;
+      state.hands[0].x = hand_ideal_x*0.6f;
+      state.hands[0].y = ty;
 
-      state.boards[0] = (Board) {
-        .stage = BoardStage_Init,
-        .beg_x = 0.8f + 1.2f, .beg_y =        0.6f+ty,
-        .end_x =        1.2f, .end_y = 0.8f + 0.6f+ty,
-      };
+      Board *l = board_alloc();
+      l->stage = BoardStage_Init;
+      l->beg_x = 0.8f + 1.2f; l->beg_y =        0.6f+ty;
+      l->end_x =        1.2f; l->end_y = 0.8f + 0.6f+ty;
 
-      state.boards[1] = (Board) {
-        .stage = BoardStage_Init,
-        .beg_x =  0.8f - 1.4f, .beg_y =          1.4f+ty,
-        .end_x =       - 1.4f, .end_y = - 0.8f + 1.4f+ty,
-      };
+      Board *r = board_alloc();
+      r->stage = BoardStage_Init;
+      r->beg_x =  0.8f - 1.4f; r->beg_y =          1.4f+ty;
+      r->end_x =       - 1.4f; r->end_y = - 0.8f + 1.4f+ty;
 #endif
 
       state.tutorial_stage = TutorialStage_AwaitHandSelect;
@@ -599,19 +623,19 @@ static void tutorial(void) {
 
       text_popup_draw(&(TextPopup) {
         .msg = "can't reach!",
-        .size = 0.12f, .y = 0.1f, .x = 0.2f
+        .size = 0.095f, .y = 0.13f, .x = 0.2f
       });
 
       text_popup_draw(&(TextPopup) {
         .msg = "mf got t-rex arm",
-        .size = 0.07f, .y = 0.02f, .x = 0.3f
+        .size = 0.063f, .y = 0.04f, .x = 0.24f
       });
 
-      TextPopup tp = { .msg = " <- double click here to select", .size = 0.03f };
-      text_popup_set_in_world(&tp, state.hand.x, state.hand.y);
+      TextPopup tp = { .msg = " <- double click here to select", .size = 0.025f };
+      text_popup_set_in_world(&tp, state.hands[0].x, state.hands[0].y);
       text_popup_draw(&tp);
 
-      if (state.mode == Mode_HandTweak) {
+      if (state.mode == Mode_HandView) {
         state.tutorial_stage = TutorialStage_AwaitHandDragStart;
       }
     } break;
@@ -619,12 +643,12 @@ static void tutorial(void) {
     case (TutorialStage_AwaitHandDragStart): {
       text_popup_draw(&(TextPopup) {
         .msg = "selected!",
-        .size = 0.12f, .y = 0.1f, .x = 0.2f
+        .size = 0.095f, .y = 0.13f, .x = 0.3f
       });
 
       text_popup_draw(&(TextPopup) {
         .msg = "now drag 'em so he can reach!",
-        .size = 0.07f, .y = 0.02f, .x = 0.1f
+        .size = 0.053f, .y = 0.04f, .x = 0.10f
       });
 
       if (state.mode == Mode_HandMove) {
@@ -633,19 +657,19 @@ static void tutorial(void) {
     } break;
 
     case (TutorialStage_AwaitHandDragEnd): {
-      state.hand_selected->stage = HandStage_Frozen;
+      state.hands[0].stage = HandStage_Frozen;
       TextPopup tp = { .msg = " <- here maybe?", .size = 0.03f };
       text_popup_set_in_world(&tp, hand_ideal_x, hand_ideal_y);
       text_popup_draw(&tp);
 
-      float dx = state.hand_selected->x - hand_ideal_x;
-      float dy = state.hand_selected->y - hand_ideal_y;
+      float dx = state.hands[0].x - hand_ideal_x;
+      float dy = state.hands[0].y - hand_ideal_y;
       if (mag(dx, dy) > 0.2f) break;
 
       if (state.mode == Mode_HandMove) break;
-      state.hand_selected->stage = HandStage_Init;
-      state.hand_selected->x = hand_ideal_x;
-      state.hand_selected->y = hand_ideal_y;
+      state.hands[0].stage = HandStage_Init;
+      state.hands[0].x = hand_ideal_x;
+      state.hands[0].y = hand_ideal_y;
       state.tutorial_stage = TutorialStage_AwaitHouseBuild;
     } break;
 
@@ -657,12 +681,12 @@ static void tutorial(void) {
     case (TutorialStage_AwaitHouseLand): {
       text_popup_draw(&(TextPopup) {
         .msg = "a home!",
-        .size = 0.12f, .y = 0.1f, .x = 0.2f
+        .size = 0.095f, .y = 0.13f, .x = 0.3f
       });
 
       text_popup_draw(&(TextPopup) {
         .msg = "we'll be needing more of these ...",
-        .size = 0.07f, .y = 0.02f, .x = 0.0f
+        .size = 0.041f, .y = 0.04f, .x = 0.14f
       });
 
       Board *bs = state.house.boards;
@@ -704,29 +728,38 @@ static void tutorial(void) {
     case (TutorialStage_AwaitWoodDispenser): {
       text_popup_draw(&(TextPopup) {
         .msg = "we'll be needing more of these ...",
-        .size = 0.07f, .y = 0.02f, .x = 0.0f
+        .size = 0.041f, .y = 0.04f, .x = 0.14f
       });
 
       text_popup_draw(&(TextPopup) {
         .msg = " click here -> ",
-        .size = 0.06f, .y = 0.93f, .x = 0.36f
+        .size = 0.06f, .y = 0.952f, .x = 0.31f
       });
     }
   }
 }
 
 static void find_nearest_hand(float x, float y, Hand **best_hand, float *to_best_hand) {
-  HandOut hando = {0};
+  if (*to_best_hand == 0) *to_best_hand = 1e9;
 
-  Hand *hand = &state.hand;
-  hand_out(hand, state.tick, &hando);
+  for (int i = 0; i < ARR_LEN(state.hands); i++) {
+    Hand *hand = state.hands + i;
+    if (hand->stage == HandStage_Uninit) continue;
 
-  float beg_x = state.hand.x;
-  float beg_y = state.hand.y;
-  float end_x = beg_x + cosf(hando.theta);
-  float end_y = beg_y + sinf(hando.theta);
-  *to_best_hand = point_to_line(x, y, beg_x, beg_y, end_x, end_y);
-  *best_hand = hand;
+    HandOut hando = {0};
+    hand_out(hand, state.tick, &hando);
+
+    float beg_x = hando.x;
+    float beg_y = hando.y;
+    float end_x = beg_x + cosf(hando.theta);
+    float end_y = beg_y + sinf(hando.theta);
+    float to_hand = point_to_line(x, y, beg_x, beg_y, end_x, end_y);
+
+    if (to_hand < *to_best_hand) {
+      *to_best_hand = to_hand;
+      if (best_hand) *best_hand = hand;
+    }
+  }
 }
 
 static int32_t board_index(Board *board) { return board - state.boards; }
@@ -753,6 +786,7 @@ static Board *board_alloc(void) {
     Board *b = state.boards + i;
     if (b->stage == BoardStage_Uninit) {
       __builtin_memset(b, 0, sizeof(*b));
+      b->head = b;
       return b;
     }
   }
@@ -762,6 +796,16 @@ static WoodDispenser *wood_dispenser_alloc(void) {
   for (int i = 0; i < ARR_LEN(state.wood_dispensers); i++) {
     WoodDispenser *b = state.wood_dispensers + i;
     if (b->stage == WoodDispenserStage_Uninit) {
+      __builtin_memset(b, 0, sizeof(*b));
+      return b;
+    }
+  }
+  return 0;
+}
+static Hand *hand_alloc(void) {
+  for (int i = 0; i < ARR_LEN(state.hands); i++) {
+    Hand *b = state.hands + i;
+    if (b->stage == HandStage_Uninit) {
       __builtin_memset(b, 0, sizeof(*b));
       return b;
     }
@@ -780,10 +824,25 @@ WASM_EXPORT void mouseup(float x, float y) {
   env.mouse_x = x;
   env.mouse_y = y;
 
+  Hand *hand = state.hand_selected;
   if (state.mode == Mode_HandMove) {
-    state.hand_selected->x = x;
-    state.hand_selected->y = y;
-    state.mode = Mode_HandTweak;
+    hand->x = x;
+    hand->y = y;
+    state.mode = Mode_HandView;
+  }
+  if (state.mode == Mode_HandMoveAngleGrab) {
+    hand->angle_grab = atan2f(y - hand->y, x - hand->x);
+    hand->stage = HandStage_Grab;
+    hand->tick_stage_start = state.tick;
+    hand->tick_stage_end   = state.tick + TICK_SECOND;
+    state.mode = Mode_HandView;
+  }
+  if (state.mode == Mode_HandMoveAngleRelease) {
+    hand->angle_release = atan2f(y - hand->y, x - hand->x);
+    hand->stage = HandStage_Release;
+    hand->tick_stage_start = state.tick;
+    hand->tick_stage_end   = state.tick + TICK_SECOND;
+    state.mode = Mode_HandView;
   }
 }
 
@@ -806,28 +865,47 @@ WASM_EXPORT void mousedown(float x, float y) {
   switch (state.mode) {
     case (Mode_View): {
       if (to_nearest_hand < CLICK_DIST_SELECT && double_click) {
-        state.hand_selected = &state.hand;
-        state.mode = Mode_HandTweak;
+        state.hand_selected = nearest_hand;
+        state.mode = Mode_HandView;
       }
     } break;
 
-    case (Mode_HandTweak): {
-      if (to_nearest_hand > CLICK_DIST_UNSELECT) {
+    case (Mode_HandView): {
+      Hand *hand = state.hand_selected;
+      float to_selected_hand = mag(hand->x - env.mouse_x,
+                                   hand->y - env.mouse_y);
+
+      float    to_angle_grab = mag((hand->x + cosf(hand->   angle_grab)) - x,
+                                   (hand->y + sinf(hand->   angle_grab)) - y);
+      if (to_angle_grab < CLICK_DIST_SELECT) {
+        state.mode = Mode_HandMoveAngleGrab;
+        break;
+      }
+
+      float to_angle_release = mag((hand->x + cosf(hand->      angle_release)) - x,
+                                   (hand->y + sinf(hand->      angle_release)) - y);
+      if (to_angle_release < CLICK_DIST_SELECT) {
+        state.mode = Mode_HandMoveAngleRelease;
+        break;
+      }
+
+      if (to_selected_hand > 1.5f) {
         state.mode = Mode_View;
         state.hand_selected = 0;
       }
-      if (to_nearest_hand < CLICK_DIST_SELECT) {
+      if (to_selected_hand < CLICK_DIST_SELECT) {
         state.mode = Mode_HandMove;
       }
     } break;
 
+    case (Mode_BuyPreview): { /* hi (see ui) */ } break;
+
+    case (Mode_HandMoveAngleGrab):
+    case (Mode_HandMoveAngleRelease):
     case (Mode_HandMove): {
-      // hi
+      /* hi */
     } break;
 
-    case (Mode_BuyPreview): {
-      // hi (see ui)
-    } break;
   }
 
   ui(1);
@@ -1001,6 +1079,7 @@ static int fontdata_read(int x, int y, char c) {
   return (bits >> (7-x)) & 1;
 }
 
+#if 0
 static void rcx_char(int px, int py, int scale, char c) {
   for (int y = 0; y < 8*scale; y++) {
     for (int x = 0; x < 8*scale; x++)
@@ -1008,6 +1087,7 @@ static void rcx_char(int px, int py, int scale, char c) {
         write_pixel(px + x, py + y, (Color) { 0, 0, 0, 255 }, 1.0f);
   }
 }
+#endif
 
 static void text_popup_set_in_world(TextPopup *tp, float x, float y) {
   world_to_screen(&x, &y);
@@ -1015,8 +1095,11 @@ static void text_popup_set_in_world(TextPopup *tp, float x, float y) {
   tp->y = 1 - y / rendr.height;
 }
 static void text_popup_draw(TextPopup *tp) {
-  float ideal_size = rendr.height * tp->size;
-  int scale = ideal_size/8;
+#if 0
+  /* scale by integer factor */
+  int ideal_size = rendr.height * tp->size;
+  int scale = ideal_size/13.5;
+  if (scale < 1) scale = 1;
 
   float x =      tp->x  * rendr. width;
   float y = (1 - tp->y) * rendr.height;
@@ -1026,9 +1109,36 @@ static void text_popup_draw(TextPopup *tp) {
     rcx_char(x, y, scale, *str);
     x += 8*scale;
   }
+#endif
+  int height = rendr.height * tp->size;
+
+  int len = 0;
+  for (char *str = tp->msg; *str; str++) len++;
+  int width = len*height; /* monospace */
+
+  int nx =      tp->x  * rendr. width;
+  int ny = (1 - tp->y) * rendr.height;
+  ny -= height*0.55f;
+
+  for (int x = 0; x < width; x++)
+    for (int y = 0; y < height; y++) {
+      // write_pixel(nx + x, ny + y, (Color) { 0, 0, 0, 255 }, 1.0f);
+      // continue;
+
+      int char_i = x / height; /* monospace */
+
+      /* premultiplying by eight instead of using the FPU because im a fuckin chad */
+      int char_x = ((x % height) * 8) / height;
+      int char_y = ((y * 8) / height);
+
+      if (fontdata_read(char_x, char_y, tp->msg[char_i]))
+        write_pixel(nx + x, ny + y, (Color) { 0, 0, 0, 255 }, 1.0f);
+    }
 }
 /* in normalized (screen) coords */
 static float text_popup_width(TextPopup *tp) {
+#if 0
+  old integer scale code 
   float ideal_size = rendr.height * tp->size;
   int scale = ideal_size/8;
 
@@ -1036,6 +1146,20 @@ static float text_popup_width(TextPopup *tp) {
   float ret = 0;
   for (char *str = tp->msg; *str; str++) ret += 8*scale;
   return ret/rendr.width;
+#endif 
+  int len = 0;
+  for (char *str = tp->msg; *str; str++) len++;
+  return len*tp->size * 0.5f; /* monospace */
+}
+static void text_popup_underline(TextPopup *tp) {
+  float x0 =rendr. width * (tp->x);
+  float y0 =rendr.height * (1 - tp->y + tp->size/3);
+  screen_to_world(&x0, &y0);
+  float x1 =rendr. width * (tp->x + text_popup_width(tp));
+  float y1 =rendr.height * (1 - tp->y + tp->size/3);
+  screen_to_world(&x1, &y1);
+
+  plot_line(x0, y0, x1, y1, (Color) { 0, 0, 0, 255 });
 }
 static int text_popup_hovered(TextPopup *tp) {
   float mx = env.mouse_x;
@@ -1122,21 +1246,22 @@ WASM_EXPORT void draw(double elapsed) {
 
   for (int i = 0; i < ARR_LEN(state.boards); i++) {
     if (state.boards[i].next) state.boards[i].next -= (long)(state.boards - 1);
-    if (state.boards[i].prev) state.boards[i].prev -= (long)(state.boards - 1);
+    if (state.boards[i].head) state.boards[i].head -= (long)(state.boards - 1);
   }
   local_save(&state.boards, sizeof(state.boards));
   for (int i = 0; i < ARR_LEN(state.boards); i++) {
     if (state.boards[i].next) state.boards[i].next += (long)(state.boards - 1);
-    if (state.boards[i].prev) state.boards[i].prev += (long)(state.boards - 1);
+    if (state.boards[i].head) state.boards[i].head += (long)(state.boards - 1);
   }
 
   int last_tick = state.tick++;
 
   /* boards move with hands */
-  {
-    Hand *hand = &state.hand;
-    HandOut hando = {0};
+  for (int i = 0; i < ARR_LEN(state.hands); i++) {
+    Hand *hand = state.hands + i;
+    if (hand->stage == HandStage_Uninit) continue;
 
+    HandOut hando = {0};
     hand_out(hand, last_tick, &hando);
     float last_theta = hando.theta;
 
@@ -1151,30 +1276,40 @@ WASM_EXPORT void draw(double elapsed) {
       /* what is this, the name of a fraternity? */
       float delta_theta = new_theta - last_theta;
 
-      Board *head = b; while (head->prev) head = head->prev;
-      Board *next = head;
+      Board *next = b->head;
       do {
+        /* don't die in my arms ... die after that lol */
+        /* no dying while i'm dragging you around!!! */
+        next->stage = BoardStage_Fading;
+        next->tick_stage_start = state.tick;
+        next->tick_stage_end   = state.tick + TICK_SECOND;
+
         board_pivot(next, hand->x, hand->y, delta_theta);
       } while ((next = next->next));
     }
   }
 
-  /* boards that touch, stick */
   for (int i = 0; i < ARR_LEN(state.boards); i++) {
     Board *a = state.boards + i;
+
+    if (a->stage == BoardStage_Fading && state.tick > a->tick_stage_end)
+      a->stage = BoardStage_Uninit;
+
+    /* boards that touch, stick */
     if (a->stage != BoardStage_Sticky) continue;
-    a->stage = BoardStage_Init;
+    a->stage = BoardStage_Fading;
+    a->tick_stage_start = state.tick;
+    a->tick_stage_end   = state.tick + TICK_SECOND;
 
     /* quadratic perf goes WEEEE */
     for (int i = 0; i < ARR_LEN(state.boards); i++) {
       Board *b = state.boards + i;
       if (a->stage == BoardStage_Uninit) continue;
 
-      Board *head = b; while (head->prev) head = head->prev;
-      Board *next = head;
+      Board *next = b->head;
       do {
         if (next == a) goto SKIP;
-      } while ((next = next->next));
+      } while (next->next && (next = next->next));
 
       float ox, oy;
       int hit = line_intersection(
@@ -1186,14 +1321,10 @@ WASM_EXPORT void draw(double elapsed) {
       );
 
       if (hit) {
-        if (b->next) b->next->prev = a;
+        next->next = a;
+        a->head = next->head;
 
-        a->next = b->next;
-        b->next = a;
-
-        a->prev = b;
-
-        structure_test(head);
+        structure_test(b->head);
       }
 SKIP:
       ;
@@ -1207,22 +1338,27 @@ SKIP:
              10.0f, 0.0f,
             (Color) { 128, 200, 128, 255 });
 
-  {
-    HandOut hando = {0};
-    hand_out(&state.hand, state.tick, &hando);
-    Color body_clr = {  85,  75, 100, 255 };
 
-    Hand *nearest_hand = 0;
-    float to_nearest_hand = 0;
-    find_nearest_hand(env.mouse_x, env.mouse_y, &nearest_hand, &to_nearest_hand);
+  Hand *near_mouse_hand = 0;
+  float to_near_mouse_hand = 0;
+  find_nearest_hand(env.mouse_x, env.mouse_y, &near_mouse_hand, &to_near_mouse_hand);
+  for (int i = 0; i < ARR_LEN(state.hands); i++) {
+    Hand *hand = state.hands + i;
+    if (hand->stage == HandStage_Uninit) continue;
+
+    HandOut hando = {0};
+    hand_out(hand, state.tick, &hando);
+    Color body_clr = {  85,  75, 100, 255 };
 
     switch (state.mode) {
       case (Mode_View): {
-        if (to_nearest_hand < CLICK_DIST_SELECT)
+        if (hand == near_mouse_hand && to_near_mouse_hand < CLICK_DIST_SELECT)
           body_clr = (Color) { 185,  75,  55, 255 };
       } break;
 
-      case (Mode_HandTweak): {
+      case (Mode_HandView): {
+        if (hand != state.hand_selected) break;
+
         body_clr = (Color) { 215,  50,   0, 255 };
 
         {
@@ -1233,22 +1369,92 @@ SKIP:
 
           HandOut arc = hando;
           Color arc_clr = { 205, 140, 205, 255 };
-          arc.theta = ARC.offset - ARC.width/2;
+          arc.theta = hando.angle_grab;
           arc.grip_width = GRIP_WIDTH_GRAB;
           draw_hand(&arc, arc_clr);
+          {
+            Color clr = arc_clr;
+            float _x = x + cosf(arc.angle_grab);
+            float _y = y + sinf(arc.angle_grab);
+            if (mag(_x - env.mouse_x, _y - env.mouse_y) < CLICK_DIST_SELECT)
+              clr.g = 0, clr.b = 0;
+            plot_line(_x-0.1, _y-0.0, _x+0.1, _y+0.0, clr);
+            plot_line(_x-0.0, _y-0.1, _x+0.0, _y+0.1, clr);
+          }
 
-          arc.theta = ARC.offset + ARC.width/2;
+          arc.theta = hando.angle_release;
           arc.grip_width = GRIP_WIDTH_RELEASE;
           draw_hand(&arc, arc_clr);
+          {
+            Color clr = arc_clr;
+            float _x = x + cosf(arc.angle_release);
+            float _y = y + sinf(arc.angle_release);
+            if (mag(_x - env.mouse_x, _y - env.mouse_y) < CLICK_DIST_SELECT)
+              clr.g = 0, clr.b = 0;
+            plot_line(_x-0.1, _y-0.0, _x+0.1, _y+0.0, clr);
+            plot_line(_x-0.0, _y-0.1, _x+0.0, _y+0.1, clr);
+          }
         }
 
-        if (to_nearest_hand > CLICK_DIST_UNSELECT)
+        if (to_near_mouse_hand > CLICK_DIST_UNSELECT)
           body_clr = (Color) { 180,  85,   0, 255 };
-        if (to_nearest_hand < CLICK_DIST_SELECT)
+        if (to_near_mouse_hand < CLICK_DIST_SELECT)
           body_clr = (Color) { 255,   0,   0, 255 };
       } break;
 
+      case (Mode_HandMoveAngleGrab): {
+        if (hand != state.hand_selected) break;
+
+        float x = hando.x;
+        float y = hando.y;
+        plot_line(x-0.1, y-0.0, x+0.1, y+0.0, (Color) { 255, 0, 0, 255 });
+        plot_line(x-0.0, y-0.1, x+0.0, y+0.1, (Color) { 255, 0, 0, 255 });
+
+        HandOut arc = hando;
+
+        {
+          Color arc_clr = { 140, 205, 185, 255 };
+          arc.theta = atan2f(env.mouse_y - y, env.mouse_x - x);
+          arc.grip_width = GRIP_WIDTH_GRAB;
+          draw_hand(&arc, arc_clr);
+        }
+
+        {
+          Color arc_clr = { 205, 140, 205, 255 };
+          arc.theta = hando.angle_release;
+          arc.grip_width = GRIP_WIDTH_RELEASE;
+          draw_hand(&arc, arc_clr);
+        }
+      } break;
+
+      case (Mode_HandMoveAngleRelease): {
+        if (hand != state.hand_selected) break;
+
+        float x = hando.x;
+        float y = hando.y;
+        plot_line(x-0.1, y-0.0, x+0.1, y+0.0, (Color) { 255, 0, 0, 255 });
+        plot_line(x-0.0, y-0.1, x+0.0, y+0.1, (Color) { 255, 0, 0, 255 });
+
+        HandOut arc = hando;
+
+        {
+          Color arc_clr = { 205, 140, 205, 255 };
+          arc.theta = hando.angle_grab;
+          arc.grip_width = GRIP_WIDTH_GRAB;
+          draw_hand(&arc, arc_clr);
+        }
+
+        {
+          Color arc_clr = { 140, 205, 185, 255 };
+          arc.theta = atan2f(env.mouse_y - y, env.mouse_x - x);
+          arc.grip_width = GRIP_WIDTH_RELEASE;
+          draw_hand(&arc, arc_clr);
+        }
+      } break;
+
       case (Mode_HandMove): {
+        if (hand != state.hand_selected) break;
+
         body_clr = (Color) {  80, 195,  80, 255 };
 
         HandOut arc = hando;
@@ -1256,29 +1462,44 @@ SKIP:
         arc.y = env.mouse_y;
 
         Color arc_clr = { 140, 205, 185, 255 };
-        arc.theta = ARC.offset - ARC.width/2;
+        arc.theta = hando.angle_grab;
         arc.grip_width = GRIP_WIDTH_GRAB;
         draw_hand(&arc, arc_clr);
 
-        arc.theta = ARC.offset + ARC.width/2;
+        arc.theta = hando.angle_release;
         arc.grip_width = GRIP_WIDTH_RELEASE;
         draw_hand(&arc, arc_clr);
       } break;
 
       case (Mode_BuyPreview): {
-        WoodDispenserOut wdo = {0};
-        wood_dispenser_out(
-          &(WoodDispenser) { .x = env.mouse_x,
-                             .y = env.mouse_y,
-                             .tick_stage_start = state.tick-TICK_SECOND,
-                             .tick_stage_end   = state.tick+1,
-                             .stage = WoodDispenserStage_Spawning },
-          state.tick,
-          &wdo
-        );
-        rendr.alpha = 0.3f;
-        draw_wood_dispenser(&wdo);
-        rendr.alpha = 1.0f;
+        if (state.preview_tool_kind == ToolKind_WoodDispenser) {
+          WoodDispenserOut wdo = {0};
+          wood_dispenser_out(
+            &(WoodDispenser) { .x = env.mouse_x,
+                               .y = env.mouse_y,
+                               .tick_stage_start = state.tick-TICK_SECOND,
+                               .tick_stage_end   = state.tick+1,
+                               .stage = WoodDispenserStage_Spawning },
+            state.tick,
+            &wdo
+          );
+          rendr.alpha = 0.3f;
+          draw_wood_dispenser(&wdo);
+          rendr.alpha = 1.0f;
+        }
+        if (state.preview_tool_kind == ToolKind_Hand) {
+          HandOut ghost = {0};
+          hand_out(
+            &(Hand) { .x = env.mouse_x,
+                      .y = env.mouse_y,
+                      .tick_stage_start = state.tick-TICK_SECOND,
+                      .tick_stage_end   = state.tick+1,
+                      .stage = HandStage_Grab },
+            state.tick,
+            &ghost
+          );
+          draw_hand(&ghost, (Color) { 120, 185, 120, 255 });
+        }
       } break;
     }
 
@@ -1302,21 +1523,31 @@ SKIP:
     draw_wood_dispenser(&wdo);
   }
 
+  /* draw boards (all of 'em!) */
   for (int i = 0; i < ARR_LEN(state.boards); i++) {
     Board *b = state.boards + i;
     if (b->stage == BoardStage_Uninit) continue;
+
+    if (b->stage == BoardStage_Fading) {
+      float duration = b->tick_stage_end - b->tick_stage_start;
+      float elapsed = state.tick - b->tick_stage_start;
+      float t = (duration > 0) ? (elapsed / duration) : 0;
+      rendr.alpha = ease_out_quad(1 - t);
+    }
+
     plot_line_thick(b->beg_x, b->beg_y,
                     b->end_x, b->end_y,
                     clr_board, 0.18f);
+    rendr.alpha = 1.0f;
   }
 
-  {
+  /* {
     float x = env.mouse_x;
     float y = env.mouse_y;
     Color red = { 255, 0, 0, 255 };
     plot_line(x-0.1, y-0.0, x+0.1, y+0.0, red);
     plot_line(x-0.0, y-0.1, x+0.0, y+0.1, red);
-  }
+  } */
 
   /* decorate house */
   if (state.house.init) {
@@ -1474,36 +1705,69 @@ SKIP:
 }
 
 static void ui(int mousedown) {
-  TextPopup tp = {
-    .msg = "wood dispenser",
-    .size = 0.05f,
-    .y = 0.95f,
-    .x = 0.78f
-  };
-  text_popup_draw(&tp);
-  if (text_popup_hovered(&tp)) {
-    float x0 =rendr. width * (tp.x);
-    float y0 =rendr.height * (1 - tp.y + tp.size/3);
-    screen_to_world(&x0, &y0);
-    float x1 =rendr. width * (tp.x + text_popup_width(&tp));
-    float y1 =rendr.height * (1 - tp.y + tp.size/3);
-    screen_to_world(&x1, &y1);
+  {
+    TextPopup tp = {
+      .msg = "wood dispenser",
+      .size = 0.028f,
+      .y = 0.95f,
+      .x = 0.78f
+    };
+    text_popup_draw(&tp);
+    if (text_popup_hovered(&tp)) {
+      text_popup_underline(&tp);
 
-    plot_line(x0, y0, x1, y1, (Color) { 0, 0, 0, 255 });
+      if (mousedown) state.mode = Mode_BuyPreview,
+                     state.preview_tool_kind = ToolKind_WoodDispenser;
+    }
 
-    if (mousedown) state.mode = Mode_BuyPreview;
+    if (!text_popup_hovered(&tp)      &&
+        mousedown &&
+        state.mode == Mode_BuyPreview &&
+        state.preview_tool_kind == ToolKind_WoodDispenser
+    ) {
+
+      WoodDispenser *wd = wood_dispenser_alloc();
+      if (!wd) return;
+
+      wd->stage = WoodDispenserStage_Init;
+      wd->x = env.mouse_x;
+      wd->y = env.mouse_y;
+
+      state.mode = Mode_View;
+    }
   }
 
-  if (!text_popup_hovered(&tp) && mousedown && state.mode == Mode_BuyPreview) {
+  {
+    TextPopup tp = {
+      .msg = "hand",
+      .size = 0.028f,
+      .y = 0.95f,
+      .x = 0.78f
+    };
+    tp.y -= tp.size * 2.2f;
 
-    WoodDispenser *wd = wood_dispenser_alloc();
-    if (!wd) return;
+    text_popup_draw(&tp);
+    if (text_popup_hovered(&tp)) {
+      text_popup_underline(&tp);
 
-    wd->stage = WoodDispenserStage_Init;
-    wd->x = env.mouse_x;
-    wd->y = env.mouse_y;
+      if (mousedown) state.mode = Mode_BuyPreview,
+                     state.preview_tool_kind = ToolKind_Hand;
+    }
 
-    state.mode = Mode_View;
+    if (!text_popup_hovered(&tp)      &&
+        mousedown &&
+        state.mode == Mode_BuyPreview &&
+        state.preview_tool_kind == ToolKind_Hand
+    ) {
+      Hand *hand = hand_alloc();
+      if (!hand) return;
+
+      hand->stage = HandStage_Init;
+      hand->x = env.mouse_x;
+      hand->y = env.mouse_y;
+
+      state.mode = Mode_View;
+    }
   }
 }
 
