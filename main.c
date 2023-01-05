@@ -556,6 +556,8 @@ typedef enum {
   Mode_HandMoveAngleGrab,
   Mode_HandMoveAngleRelease,
   Mode_HandMove,
+  Mode_WoodDispenserView,
+  Mode_WoodDispenserMove,
   Mode_BuyPreview,
 } Mode;
 static struct { 
@@ -563,8 +565,9 @@ static struct {
   TutorialStage tutorial_stage;
 
   Mode mode;
-  /* for Mode_Hand*         */ Hand *hand_selected;
-  /* for Mode_BuyPreview    */ ToolKind preview_tool_kind;
+  /* for Mode_Hand*           */ Hand *hand_selected;
+  /* for Mode_WoodDispenser*  */ WoodDispenser *wood_dispenser_selected;
+  /* for Mode_BuyPreview      */ ToolKind preview_tool_kind;
 
   WoodDispenser wood_dispensers[1 << 4];
   Hand hands[1 << 4];
@@ -739,6 +742,16 @@ static void tutorial(void) {
   }
 }
 
+static Hand *hand_alloc(void) {
+  for (int i = 0; i < ARR_LEN(state.hands); i++) {
+    Hand *b = state.hands + i;
+    if (b->stage == HandStage_Uninit) {
+      __builtin_memset(b, 0, sizeof(*b));
+      return b;
+    }
+  }
+  return 0;
+}
 static void find_nearest_hand(float x, float y, Hand **best_hand, float *to_best_hand) {
   if (*to_best_hand == 0) *to_best_hand = 1e9;
 
@@ -792,6 +805,7 @@ static Board *board_alloc(void) {
   }
   return 0;
 }
+
 static WoodDispenser *wood_dispenser_alloc(void) {
   for (int i = 0; i < ARR_LEN(state.wood_dispensers); i++) {
     WoodDispenser *b = state.wood_dispensers + i;
@@ -802,15 +816,20 @@ static WoodDispenser *wood_dispenser_alloc(void) {
   }
   return 0;
 }
-static Hand *hand_alloc(void) {
-  for (int i = 0; i < ARR_LEN(state.hands); i++) {
-    Hand *b = state.hands + i;
-    if (b->stage == HandStage_Uninit) {
-      __builtin_memset(b, 0, sizeof(*b));
-      return b;
+static void find_nearest_wood_dispenser(float x, float y, WoodDispenser **best_wood_dispenser, float *to_best_wood_dispenser) {
+  if (*to_best_wood_dispenser == 0) *to_best_wood_dispenser = 1e9;
+
+  for (int i = 0; i < ARR_LEN(state.wood_dispensers); i++) {
+    WoodDispenser *b = state.wood_dispensers + i;
+    if (b->stage == WoodDispenserStage_Uninit) continue;
+
+    float to_wood_dispenser = mag(x - b->x, y - b->y);;
+
+    if (to_wood_dispenser < *to_best_wood_dispenser) {
+      *to_best_wood_dispenser = to_wood_dispenser;
+      if (best_wood_dispenser) *best_wood_dispenser = b;
     }
   }
-  return 0;
 }
 
 WASM_EXPORT void mousemove(float x, float y) {
@@ -823,6 +842,13 @@ WASM_EXPORT void mouseup(float x, float y) {
   screen_to_world(&x, &y);
   env.mouse_x = x;
   env.mouse_y = y;
+
+  WoodDispenser *wd = state.wood_dispenser_selected;
+  if (state.mode == Mode_WoodDispenserMove) {
+    wd->x = x;
+    wd->y = y;
+    state.mode = Mode_WoodDispenserView;
+  }
 
   Hand *hand = state.hand_selected;
   if (state.mode == Mode_HandMove) {
@@ -858,15 +884,30 @@ WASM_EXPORT void mousedown(float x, float y) {
   env.mouse_x = x;
   env.mouse_y = y;
 
+  ToolKind nearest_tool_kind;
+  float to_nearest_tool = 0;
   Hand *nearest_hand = 0;
   float to_nearest_hand = 0;
-  find_nearest_hand(x, y, &nearest_hand, &to_nearest_hand);
+  WoodDispenser *nearest_wood_dispenser = 0;
+  float to_nearest_wood_dispenser = 0;
+  {
+    find_nearest_hand(x, y, &nearest_hand, &to_nearest_hand);
+    find_nearest_wood_dispenser(x, y, &nearest_wood_dispenser, &to_nearest_wood_dispenser);
+    nearest_tool_kind = (to_nearest_wood_dispenser < to_nearest_hand) ? ToolKind_WoodDispenser : ToolKind_Hand;
+    to_nearest_tool = (to_nearest_wood_dispenser < to_nearest_hand) ? to_nearest_wood_dispenser : to_nearest_hand;
+  }
 
   switch (state.mode) {
     case (Mode_View): {
-      if (to_nearest_hand < CLICK_DIST_SELECT && double_click) {
-        state.hand_selected = nearest_hand;
-        state.mode = Mode_HandView;
+      if (double_click && to_nearest_tool < CLICK_DIST_SELECT) {
+        if (nearest_tool_kind == ToolKind_Hand) {
+          state.hand_selected = nearest_hand;
+          state.mode = Mode_HandView;
+        }
+        if (nearest_tool_kind == ToolKind_WoodDispenser) {
+          state.wood_dispenser_selected = nearest_wood_dispenser;
+          state.mode = Mode_WoodDispenserView;
+        }
       }
     } break;
 
@@ -889,7 +930,7 @@ WASM_EXPORT void mousedown(float x, float y) {
         break;
       }
 
-      if (to_selected_hand > 1.5f) {
+      if (to_selected_hand > CLICK_DIST_UNSELECT) {
         state.mode = Mode_View;
         state.hand_selected = 0;
       }
@@ -898,8 +939,23 @@ WASM_EXPORT void mousedown(float x, float y) {
       }
     } break;
 
+    case (Mode_WoodDispenserView): {
+      WoodDispenser *wood_dispenser = state.wood_dispenser_selected;
+      float to_selected_wood_dispenser = mag(wood_dispenser->x - env.mouse_x,
+                                             wood_dispenser->y - env.mouse_y);
+
+      if (to_selected_wood_dispenser > CLICK_DIST_UNSELECT) {
+        state.mode = Mode_View;
+        state.wood_dispenser_selected = 0;
+      }
+      if (to_selected_wood_dispenser < CLICK_DIST_SELECT) {
+        state.mode = Mode_WoodDispenserMove;
+      }
+    } break;
+
     case (Mode_BuyPreview): { /* hi (see ui) */ } break;
 
+    case (Mode_WoodDispenserMove):
     case (Mode_HandMoveAngleGrab):
     case (Mode_HandMoveAngleRelease):
     case (Mode_HandMove): {
@@ -1501,6 +1557,9 @@ SKIP:
           draw_hand(&ghost, (Color) { 120, 185, 120, 255 });
         }
       } break;
+
+      case (Mode_WoodDispenserView): {} break;
+      case (Mode_WoodDispenserMove): {} break;
     }
 
     draw_hand(&hando, body_clr);
@@ -1514,13 +1573,42 @@ SKIP:
     draw_hand(&ghost, (Color) { 120, 185, 120, 255 });
   }
 
+  WoodDispenser *near_mouse_wood_dispenser = 0;
+  float to_near_mouse_wood_dispenser = 0;
+  find_nearest_wood_dispenser(env.mouse_x, env.mouse_y, &near_mouse_wood_dispenser, &to_near_mouse_wood_dispenser);
   for (int i = 0; i < ARR_LEN(state.wood_dispensers); i++) {
     WoodDispenser *wd = state.wood_dispensers + i;
     if (wd->stage == WoodDispenserStage_Uninit) continue;
 
+    if (state.mode == Mode_View)
+      if (wd == near_mouse_wood_dispenser && to_near_mouse_wood_dispenser < CLICK_DIST_SELECT)
+        rendr.alpha = 0.5f;
+    if (state.mode == Mode_WoodDispenserView) {
+      float x = wd->x;
+      float y = wd->y;
+      plot_line(x-0.1, y-0.0, x+0.1, y+0.0, (Color) { 255, 0, 0, 255 });
+      plot_line(x-0.0, y-0.1, x+0.0, y+0.1, (Color) { 255, 0, 0, 255 });
+
+      if (to_near_mouse_wood_dispenser < CLICK_DIST_SELECT)
+        rendr.alpha = 0.30f;
+      else
+        rendr.alpha = 0.75f;
+    }
+    if (state.mode == Mode_WoodDispenserMove) {
+      rendr.alpha = 0.35f;
+      WoodDispenserOut wdo = {0};
+      wood_dispenser_out(wd, state.tick, &wdo);
+      wdo.x = env.mouse_x;
+      wdo.y = env.mouse_y;
+      draw_wood_dispenser(&wdo);
+      rendr.alpha = 1.00f;
+    }
+
     WoodDispenserOut wdo = {0};
     wood_dispenser_out(wd, state.tick, &wdo);
     draw_wood_dispenser(&wdo);
+
+    rendr.alpha = 1;
   }
 
   /* draw boards (all of 'em!) */
