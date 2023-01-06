@@ -132,54 +132,33 @@ int line_intersection_free(
   return 1;
 }
 
+// Returns 1 if the lines intersect, otherwise 0. In addition, if the lines 
+// intersect the intersection point may be stored in the floats i_x and i_y.
 int line_intersection(
-  float Ax, float Ay,
-  float Bx, float By,
-  float Cx, float Cy,
-  float Dx, float Dy,
-  float *X, float *Y
+  float p0_x, float p0_y,
+  float p1_x, float p1_y, 
+  float p2_x, float p2_y,
+  float p3_x, float p3_y,
+  float *i_x, float *i_y
 ) {
-  float  distAB, theCos, theSin, newX, ABpos ;
+  float s1_x, s1_y, s2_x, s2_y;
+  s1_x = p1_x - p0_x;     s1_y = p1_y - p0_y;
+  s2_x = p3_x - p2_x;     s2_y = p3_y - p2_y;
 
-  //  Fail if either line segment is zero-length.
-  if ((Ax==Bx && Ay==By) || (Cx==Dx && Cy==Dy)) return 0;
+  float s, t;
+  s = (-s1_y * (p0_x - p2_x) + s1_x * (p0_y - p2_y)) / (-s2_x * s1_y + s1_x * s2_y);
+  t = ( s2_x * (p0_y - p2_y) - s2_y * (p0_x - p2_x)) / (-s2_x * s1_y + s1_x * s2_y);
 
-  //  Fail if the segments share an end-point.
-  if ((Ax==Cx && Ay==Cy) || (Bx==Cx && By==Cy)
-  ||  (Ax==Dx && Ay==Dy) || (Bx==Dx && By==Dy)) {
-    return 0; }
+  if (s >= 0 && s <= 1 && t >= 0 && t <= 1) {
+    // Collision detected
+    if (i_x != 0)
+        *i_x = p0_x + (t * s1_x);
+    if (i_y != 0)
+        *i_y = p0_y + (t * s1_y);
+    return 1;
+  }
 
-  //  (1) Translate the system so that point A is on the origin.
-  Bx-=Ax; By-=Ay;
-  Cx-=Ax; Cy-=Ay;
-  Dx-=Ax; Dy-=Ay;
-
-  //  Discover the length of segment A-B.
-  distAB=sqrtf(Bx*Bx+By*By);
-
-  //  (2) Rotate the system so that point B is on the positive X axis.
-  theCos=Bx/distAB;
-  theSin=By/distAB;
-  newX=Cx*theCos+Cy*theSin;
-  Cy  =Cy*theCos-Cx*theSin; Cx=newX;
-  newX=Dx*theCos+Dy*theSin;
-  Dy  =Dy*theCos-Dx*theSin; Dx=newX;
-
-  //  Fail if segment C-D doesn't cross line A-B.
-  if ((Cy<0. && Dy<0.) || (Cy>=0. && Dy>=0.)) return 0;
-
-  //  (3) Discover the position of the intersection point along line A-B.
-  ABpos=Dx+(Cx-Dx)*Dy/(Dy-Cy);
-
-  //  Fail if segment C-D crosses line A-B outside of segment A-B.
-  if (ABpos<0. || ABpos>distAB) return 0;
-
-  //  (4) Apply the discovered position to line A-B in the original coordinate system.
-  *X=Ax+ABpos*theCos;
-  *Y=Ay+ABpos*theSin;
-
-  //  Success.
-  return 1;
+  return 0; // No collision
 }
 
 static float point_on_line(float *p_x, float *p_y,
@@ -211,7 +190,7 @@ static float point_to_line(float  p_x, float  p_y,
 
 typedef struct { float x, y; } Pos;
 /* tri[0] is joint, rest are bottom */
-static void square_to_tri(Pos points[4], Pos tri[3]) {
+static void quad_to_tri(Pos points[4], Pos tri[3]) {
   /* if we detect the joint,
    * we have 3 points that make up a triangle,
    * so we can find which side isn't filled. */
@@ -540,8 +519,14 @@ static void wood_dispenser_out(WoodDispenser *wd, uint32_t tick, WoodDispenserOu
 
 }
 
+typedef enum {
+  HouseStage_Uninit,
+  HouseStage_Init,
+  HouseStage_Falling,
+  HouseStage_Settled,
+} HouseStage;
 typedef struct {
-  int init;
+  HouseStage stage;
   Board boards[2];
 } House;
 
@@ -549,6 +534,15 @@ typedef enum {
   ToolKind_WoodDispenser,
   ToolKind_Hand,
 } ToolKind;
+/*
+typedef struct {
+  ToolKind kind;
+  union {
+    Hand *hand;
+    WoodDispenser *wood_dispenser;
+  } ptr;
+} Tool;
+*/
 
 typedef enum {
   Mode_View,
@@ -572,7 +566,7 @@ static struct {
   WoodDispenser wood_dispensers[1 << 4];
   Hand hands[1 << 4];
   Board boards[1 << 5];
-  House house;
+  House houses[1 << 4];
 
 } state = {0};
 
@@ -677,7 +671,7 @@ static void tutorial(void) {
     } break;
 
     case (TutorialStage_AwaitHouseBuild): {
-      if (!state.house.init) break;
+      if (state.houses[0].stage == HouseStage_Uninit) break;
       state.tutorial_stage = TutorialStage_AwaitHouseLand;
     } break;
 
@@ -692,39 +686,7 @@ static void tutorial(void) {
         .size = 0.041f, .y = 0.04f, .x = 0.14f
       });
 
-      Board *bs = state.house.boards;
-      // board_pivot(bs+0, cx, cy, 0.1f);
-      // board_pivot(bs+1, cx, cy, 0.1f);
-
-      Pos
-        tri[3] = {0},
-        points[4] = {
-          { bs[0].beg_x, bs[0].beg_y },
-          { bs[0].end_x, bs[0].end_y },
-          { bs[1].beg_x, bs[1].beg_y },
-          { bs[1].end_x, bs[1].end_y },
-        };
-      square_to_tri(points, tri);
-
-      /* center of base of triangle */
-      float cx = (tri[1].x + tri[2].x) / 2;
-      float cy = (tri[1].y + tri[2].y) / 2;
-      float dx = tri[1].x - tri[2].x;
-      float dy = tri[1].y - tri[2].y;
-
-      /* intentionally a perpendicular vector (also fuck atan2f's fn signature) */
-      float rot_now = atan2f( -dx, dy );
-      float ideal_rot = MATH_PI/2.0f;
-      float delta_rot = rads_dist(rot_now, ideal_rot);
-      board_pivot(bs+0, cx, cy, delta_rot*0.04f);
-      board_pivot(bs+1, cx, cy, delta_rot*0.04f);
-
-      bs[0].beg_y -= (cy - (cy*0.95f));
-      bs[0].end_y -= (cy - (cy*0.95f));
-      bs[1].beg_y -= (cy - (cy*0.95f));
-      bs[1].end_y -= (cy - (cy*0.95f));
-
-      if (delta_rot < 0.01f && cy <= 0.01f)
+      if (state.houses[0].stage == HouseStage_Settled) 
         state.tutorial_stage = TutorialStage_AwaitWoodDispenser;
     } break;
 
@@ -742,6 +704,16 @@ static void tutorial(void) {
   }
 }
 
+static House *house_alloc(void) {
+  for (int i = 0; i < ARR_LEN(state.houses); i++) {
+    House *b = state.houses + i;
+    if (b->stage == HouseStage_Uninit) {
+      __builtin_memset(b, 0, sizeof(*b));
+      return b;
+    }
+  }
+  return 0;
+}
 static Hand *hand_alloc(void) {
   for (int i = 0; i < ARR_LEN(state.hands); i++) {
     Hand *b = state.hands + i;
@@ -1250,19 +1222,43 @@ static void board_pivot(Board *b, float x, float y, float delta_theta) {
 static void structure_test(Board *head) {
   /* it's probably a house if:
    * - there are two links in the chain
-   * - the tips of the boards are close
-   * - could do angle, but area seems less brittle */
-
-  if (state.house.init) return;
+   * - the "joint" is tight? (tip touches tip, not center of board)
+   * - could do angle, but area seems less brittle? */
 
   if (!head || !head->next || (head->next->next != 0)) return;
 
-  state.house.init = 1;
-  state.house.boards[0] = *head;
-  state.house.boards[1] = *head->next;
+  /* area check */
+  {
+    Board *b = head;
+    Board *o = head->next;
+    Pos
+      tri[3] = {0},
+      points[4] = {
+        { b->beg_x, b->beg_y },
+        { b->end_x, b->end_y },
+        { o->beg_x, o->beg_y },
+        { o->end_x, o->end_y },
+      };
+    quad_to_tri(points, tri);
 
-        head->stage = BoardStage_Uninit;
-  head->next->stage = BoardStage_Uninit;
+    float cx = (tri[1].x + tri[2].x) / 2;
+    float cy = (tri[1].y + tri[2].y) / 2;
+    float area = mag(tri[1].x - tri[2].x, tri[1].y - tri[2].y) *
+                 mag(tri[0].x -       cx, tri[0].y -       cy) * 0.5f;
+    print(area);
+
+    if (area < 0.35f) return;
+  }
+
+  House *house = house_alloc();
+  if (house) {
+    house->stage = HouseStage_Init;
+    house->boards[0] = *head;
+    house->boards[1] = *head->next;
+
+          head->stage = BoardStage_Uninit;
+    head->next->stage = BoardStage_Uninit;
+  }
 }
 
 static void draw_wood_dispenser(WoodDispenserOut *wdo) {
@@ -1298,7 +1294,7 @@ WASM_EXPORT void draw(double elapsed) {
   // __builtin_memset(rendr.pixels, 235, rendr.width * rendr.height * 4);
   __builtin_memset(rendr.pixels, 255, rendr.width * rendr.height * 4);
 
-  tutorial();
+  // tutorial();
 
   for (int i = 0; i < ARR_LEN(state.boards); i++) {
     if (state.boards[i].next) state.boards[i].next -= (long)(state.boards - 1);
@@ -1638,9 +1634,12 @@ SKIP:
   } */
 
   /* decorate house */
-  if (state.house.init) {
-    Board *b = state.house.boards + 0;
-    Board *o = state.house.boards + 1;
+  for (int i = 0; i < ARR_LEN(state.houses); i++) {
+    House *h = state.houses + i;
+    if (h->stage == HouseStage_Uninit) continue;
+
+    Board *b = h->boards + 0;
+    Board *o = h->boards + 1;
 
     plot_line_thick(b->beg_x, b->beg_y,
                     b->end_x, b->end_y,
@@ -1658,7 +1657,35 @@ SKIP:
         { o->end_x, o->end_y },
       };
 
-    square_to_tri(points, tri);
+    quad_to_tri(points, tri);
+
+    if (h->stage == HouseStage_Init) {
+      h->stage = HouseStage_Falling;
+    } 
+    if (h->stage == HouseStage_Falling) {
+      Board *bs = h->boards + 0;
+
+      /* center of base of triangle */
+      float cx = (tri[1].x + tri[2].x) / 2;
+      float cy = (tri[1].y + tri[2].y) / 2;
+      float dx = tri[0].x - cx;
+      float dy = tri[0].y - cy;
+
+      float rot_now = atan2f(dy, dx);
+      float ideal_rot = MATH_PI/2.0f;
+      float delta_rot = rads_dist(rot_now, ideal_rot);
+      board_pivot(bs+0, cx, cy, delta_rot*0.04f);
+      board_pivot(bs+1, cx, cy, delta_rot*0.04f);
+
+      bs[0].beg_y -= (cy - (cy*0.95f));
+      bs[0].end_y -= (cy - (cy*0.95f));
+      bs[1].beg_y -= (cy - (cy*0.95f));
+      bs[1].end_y -= (cy - (cy*0.95f));
+
+      if (delta_rot < 0.01f && cy <= 0.01f)
+        h->stage = HouseStage_Settled;
+    }
+
     // Color red = { 255, 0, 0, 255 };
     // plot_line(tri[0].x, tri[0].y,
     //           tri[1].x, tri[1].y, red);
