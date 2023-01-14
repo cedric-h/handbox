@@ -45,11 +45,12 @@
       local_load: (buf_ptr, buf_len) => {
         const mem = instance.exports.memory.buffer;
 
+        const cache = window.localStorage.getItem("handbox");
+        if (cache == null) return;
+
         new Uint8Array(mem, buf_ptr, buf_len).set(
           new Uint8Array(
-            window
-              .localStorage
-              .getItem("handbox")
+            cache
               .split('')
               .slice(0, buf_len)
               .map(x => x.charCodeAt(0))

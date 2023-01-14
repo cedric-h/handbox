@@ -30,6 +30,55 @@ extern unsigned char __heap_base;
 #define PAGE_SIZE (1 << 16)
 /* -- END WASM -- */
 
+/* -- BEGIN SERIALIZATION -- */
+typedef enum {
+  LoVe_Save,
+  LoVe_Load,
+} LoVe;
+typedef struct {
+  LoVe lo_ve;
+  uint8_t *bytes;
+  uint32_t bytes_len;
+  uint8_t *cursor;
+
+  int oom;
+} LoVeEnv;
+static void save_byte(LoVeEnv *lenv, uint8_t u8) {
+  if ((lenv->cursor - lenv->bytes) >= lenv->bytes_len)
+    lenv->oom = 1;
+  else
+    *lenv->cursor++ = u8;
+}
+static uint8_t load_byte(LoVeEnv *lenv) {
+  if ((lenv->cursor - lenv->bytes) >= lenv->bytes_len) {
+    lenv->oom = 1;
+    return 0;
+  } else
+    return *lenv->cursor++;
+}
+static void lo_ve_uint32_t(LoVeEnv *lenv, uint32_t *u32) {
+  if (lenv->lo_ve == LoVe_Save) {
+    save_byte(lenv, (*u32 >>  0) & 0xff);
+    save_byte(lenv, (*u32 >>  8) & 0xff);
+    save_byte(lenv, (*u32 >> 16) & 0xff);
+    save_byte(lenv, (*u32 >> 24) & 0xff);
+  }
+  if (lenv->lo_ve == LoVe_Load) {
+    *u32 = ((uint32_t)load_byte(lenv) <<  0) |
+           ((uint32_t)load_byte(lenv) <<  8) |
+           ((uint32_t)load_byte(lenv) << 16) |
+           ((uint32_t)load_byte(lenv) << 24);
+  }
+}
+static void lo_ve_float(LoVeEnv *lenv, float *f32) {
+  uint32_t u32 = 0;
+  __builtin_memcpy(&u32, f32, sizeof(u32));
+  lo_ve_uint32_t(lenv, &u32);
+  __builtin_memcpy(f32, &u32, sizeof(u32));
+  // print(*f32);
+}
+/* -- END SERIALIZATION -- */
+
 /* -- BEGIN MATH -- */
 #define abs(a) (((a) < 0) ? -(a) : (a))
 
@@ -323,6 +372,17 @@ typedef struct {
 
   int32_t grabbed_board;
 } Hand;
+static void lo_ve_hand(LoVeEnv *lenv, Hand *hand) {
+  lo_ve_uint32_t(lenv, &hand->stage);
+  lo_ve_float(lenv, &hand->x);
+  lo_ve_float(lenv, &hand->y);
+  lo_ve_float(lenv, &hand->angle_grab);
+  lo_ve_float(lenv, &hand->angle_release);
+  lo_ve_uint32_t(lenv, &hand->tick_stage_start);
+  lo_ve_uint32_t(lenv, &hand->tick_stage_end);
+  lo_ve_uint32_t(lenv, (uint32_t *)&hand->grabbed_board);
+}
+
 typedef struct {
   float theta, grip_width;
   float x, y;
@@ -448,6 +508,14 @@ typedef struct {
 
   uint32_t tick_stage_start, tick_stage_end;
 } WoodDispenser;
+static void lo_ve_wood_dispenser(LoVeEnv *lenv, WoodDispenser *wd) {
+  lo_ve_uint32_t(lenv, &wd->stage);
+  lo_ve_float(lenv, &wd->x);
+  lo_ve_float(lenv, &wd->y);
+  lo_ve_uint32_t(lenv, &wd->tick_stage_start);
+  lo_ve_uint32_t(lenv, &wd->tick_stage_end);
+}
+
 typedef struct {
   float x, y;
   float beg_x, beg_y,
@@ -501,18 +569,6 @@ static void wood_dispenser_out(WoodDispenser *wd, uint32_t tick, WoodDispenserOu
       float dist = 0;
       find_nearest_board(wd->x+0.05f, wd->y-0.05f, 0, &dist);
 
-      
-      
-      
-      
-      
-      
-      
-
-      
-      
-      
-
       if (dist > 0.1f)
         wd->stage = WoodDispenserStage_Init;
     } break;
@@ -555,7 +611,7 @@ typedef enum {
   Mode_WoodDispenserMove,
   Mode_BuyPreview,
 } Mode;
-static struct { 
+typedef struct {
   uint32_t tick, tick_last_click;
   TutorialStage tutorial_stage;
 
@@ -564,12 +620,63 @@ static struct {
   /* for Mode_WoodDispenser*  */ WoodDispenser *wood_dispenser_selected;
   /* for Mode_BuyPreview      */ ToolKind preview_tool_kind;
 
-  WoodDispenser wood_dispensers[1 << 4];
   Hand hands[1 << 4];
+  WoodDispenser wood_dispensers[1 << 4];
   Board boards[1 << 5];
   House houses[1 << 4];
 
-} state = {0};
+} State;
+static void lo_ve_state(LoVeEnv *lenv, State *state) {
+  lo_ve_uint32_t(lenv, &state->tick);
+  lo_ve_uint32_t(lenv, &state->tick_last_click);
+  lo_ve_uint32_t(lenv, &state->tutorial_stage);
+  lo_ve_uint32_t(lenv, &state->mode);
+
+  uint32_t hand_selected_i = state->hand_selected - state->hands;
+  lo_ve_uint32_t(lenv, &hand_selected_i);
+  state->hand_selected = state->hands + hand_selected_i;
+
+  uint32_t wood_dispenser_selected_i =
+    state->wood_dispenser_selected - state->wood_dispensers;
+  lo_ve_uint32_t(lenv, &wood_dispenser_selected_i);
+  state->wood_dispenser_selected = state->wood_dispensers + wood_dispenser_selected_i;
+
+  lo_ve_uint32_t(lenv, &state->preview_tool_kind);
+
+  uint32_t n_hands = ARR_LEN(state->hands);
+  lo_ve_uint32_t(lenv, &n_hands);
+  for (int i = 0; i < n_hands; i++)
+    lo_ve_hand(lenv, state->hands + i);
+
+  uint32_t n_wood_dispenser = ARR_LEN(state->wood_dispensers);
+  lo_ve_uint32_t(lenv, &n_wood_dispenser);
+  for (int i = 0; i < n_wood_dispenser; i++)
+    lo_ve_wood_dispenser(lenv, state->wood_dispensers + i);
+}
+
+static State state = {0};
+static void state_save(void) {
+  uint8_t buf[sizeof(state)] = {0};
+  LoVeEnv lenv = {
+    .lo_ve = LoVe_Save,
+    .bytes     =        buf,
+    .bytes_len = sizeof(buf),
+    .cursor    =        buf,
+  };
+  lo_ve_state(&lenv, &state);
+  local_save(buf, sizeof(buf));
+}
+static void state_load(void) {
+  uint8_t buf[sizeof(state)] = {0};
+  LoVeEnv lenv = {
+    .lo_ve = LoVe_Load,
+    .bytes     =        buf,
+    .bytes_len = sizeof(buf),
+    .cursor    =        buf,
+  };
+  local_load(buf, sizeof(buf));
+  lo_ve_state(&lenv, &state);
+}
 
 static struct {
   float mouse_x, mouse_y;
@@ -806,12 +913,18 @@ static void find_nearest_wood_dispenser(float x, float y, WoodDispenser **best_w
 }
 
 WASM_EXPORT void mousemove(float x, float y) {
+  state_load();
+
   screen_to_world(&x, &y);
   env.mouse_x = x;
   env.mouse_y = y;
+
+  state_save();
 }
 
 WASM_EXPORT void mouseup(float x, float y) {
+  state_load();
+  
   screen_to_world(&x, &y);
   env.mouse_x = x;
   env.mouse_y = y;
@@ -843,6 +956,8 @@ WASM_EXPORT void mouseup(float x, float y) {
     hand->tick_stage_end   = state.tick + TICK_SECOND;
     state.mode = Mode_HandView;
   }
+
+  state_save();
 }
 
 float CLICK_DIST_SELECT   = 0.2f;
@@ -855,6 +970,8 @@ typedef enum {
 } UiEvent;
 static void ui(UiEvent event);
 WASM_EXPORT void mousedown(float x, float y) {
+  state_load();
+
   int double_click = (state.tick - state.tick_last_click) < (TICK_SECOND/3);
   state.tick_last_click = state.tick;
 
@@ -863,6 +980,8 @@ WASM_EXPORT void mousedown(float x, float y) {
   env.mouse_y = y;
 
   ui(double_click ? UiEvent_DoubleClick : UiEvent_Mousedown);
+
+  state_save();
 }
 
 WASM_EXPORT uint8_t *init(int width, int height) {
@@ -1211,8 +1330,9 @@ static void draw_wood_dispenser(WoodDispenserOut *wdo) {
   }
 }
 
-
 WASM_EXPORT void draw(double elapsed) {
+  state_load();
+
   rendr.alpha = 1;
   rendr.cam.y = 1.5f;
   env.elapsed = elapsed;
@@ -1221,16 +1341,6 @@ WASM_EXPORT void draw(double elapsed) {
   __builtin_memset(rendr.pixels, 255, rendr.width * rendr.height * 4);
 
   // tutorial();
-
-  for (int i = 0; i < ARR_LEN(state.boards); i++) {
-    if (state.boards[i].next) state.boards[i].next -= (long)(state.boards - 1);
-    if (state.boards[i].head) state.boards[i].head -= (long)(state.boards - 1);
-  }
-  local_save(&state.boards, sizeof(state.boards));
-  for (int i = 0; i < ARR_LEN(state.boards); i++) {
-    if (state.boards[i].next) state.boards[i].next += (long)(state.boards - 1);
-    if (state.boards[i].head) state.boards[i].head += (long)(state.boards - 1);
-  }
 
   int last_tick = state.tick++;
 
@@ -1560,6 +1670,8 @@ SKIP:
   }
 
   ui(UiEvent_Render);
+
+  state_save();
 }
 
 static void ui(UiEvent event) {
@@ -1904,6 +2016,26 @@ static void ui(UiEvent event) {
       rendr.alpha = 1.00f;
     } */
 
+  {
+    /* Math.ceil(Math.log10(Math.pow(2, 32))) */
+    char buf[10] = {0};
+
+    uint32_t n = state.tick;
+    int nchars = 0;
+    for (int i = n; i > 10; i /= 10) nchars++;
+
+    for (int i = 0; i <= nchars; i++) {
+      buf[nchars - i] = '0' + (n % 10);
+      n /= 10;
+    }
+    TextPopup tp = {
+      .msg = buf,
+      .size = 0.058f,
+      .y = 0.95f,
+      .x = 0.01f
+    };
+    text_popup_draw(&tp);
+  }
 
   {
     TextPopup tp = {
