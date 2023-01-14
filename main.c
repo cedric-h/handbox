@@ -220,6 +220,7 @@ static void quad_to_tri(Pos points[4], Pos tri[3]) {
 
 /* -- BEGIN RENDER -- */
 typedef struct { uint8_t r, g, b, a; } Color;
+Color clr_hand = { 85,  75, 100, 255 };
 Color clr_stone = {  80,  80,  80, 255 };
 Color clr_board = (Color) { 105,  55,  35, 255 };
 
@@ -846,8 +847,13 @@ WASM_EXPORT void mouseup(float x, float y) {
 
 float CLICK_DIST_SELECT   = 0.2f;
 float CLICK_DIST_UNSELECT = 0.5f;
-
-static void ui(int mousedown);
+ 
+typedef enum {
+  UiEvent_Mousedown,
+  UiEvent_DoubleClick,
+  UiEvent_Render,
+} UiEvent;
+static void ui(UiEvent event);
 WASM_EXPORT void mousedown(float x, float y) {
   int double_click = (state.tick - state.tick_last_click) < (TICK_SECOND/3);
   state.tick_last_click = state.tick;
@@ -856,87 +862,7 @@ WASM_EXPORT void mousedown(float x, float y) {
   env.mouse_x = x;
   env.mouse_y = y;
 
-  ToolKind nearest_tool_kind;
-  float to_nearest_tool = 0;
-  Hand *nearest_hand = 0;
-  float to_nearest_hand = 0;
-  WoodDispenser *nearest_wood_dispenser = 0;
-  float to_nearest_wood_dispenser = 0;
-  {
-    find_nearest_hand(x, y, &nearest_hand, &to_nearest_hand);
-    find_nearest_wood_dispenser(x, y, &nearest_wood_dispenser, &to_nearest_wood_dispenser);
-    nearest_tool_kind = (to_nearest_wood_dispenser < to_nearest_hand) ? ToolKind_WoodDispenser : ToolKind_Hand;
-    to_nearest_tool = (to_nearest_wood_dispenser < to_nearest_hand) ? to_nearest_wood_dispenser : to_nearest_hand;
-  }
-
-  switch (state.mode) {
-    case (Mode_View): {
-      if (double_click && to_nearest_tool < CLICK_DIST_SELECT) {
-        if (nearest_tool_kind == ToolKind_Hand) {
-          state.hand_selected = nearest_hand;
-          state.mode = Mode_HandView;
-        }
-        if (nearest_tool_kind == ToolKind_WoodDispenser) {
-          state.wood_dispenser_selected = nearest_wood_dispenser;
-          state.mode = Mode_WoodDispenserView;
-        }
-      }
-    } break;
-
-    case (Mode_HandView): {
-      Hand *hand = state.hand_selected;
-      float to_selected_hand = mag(hand->x - env.mouse_x,
-                                   hand->y - env.mouse_y);
-
-      float    to_angle_grab = mag((hand->x + cosf(hand->   angle_grab)) - x,
-                                   (hand->y + sinf(hand->   angle_grab)) - y);
-      if (to_angle_grab < CLICK_DIST_SELECT) {
-        state.mode = Mode_HandMoveAngleGrab;
-        break;
-      }
-
-      float to_angle_release = mag((hand->x + cosf(hand->      angle_release)) - x,
-                                   (hand->y + sinf(hand->      angle_release)) - y);
-      if (to_angle_release < CLICK_DIST_SELECT) {
-        state.mode = Mode_HandMoveAngleRelease;
-        break;
-      }
-
-      if (to_selected_hand > CLICK_DIST_UNSELECT) {
-        state.mode = Mode_View;
-        state.hand_selected = 0;
-      }
-      if (to_selected_hand < CLICK_DIST_SELECT) {
-        state.mode = Mode_HandMove;
-      }
-    } break;
-
-    case (Mode_WoodDispenserView): {
-      WoodDispenser *wood_dispenser = state.wood_dispenser_selected;
-      float to_selected_wood_dispenser = mag(wood_dispenser->x - env.mouse_x,
-                                             wood_dispenser->y - env.mouse_y);
-
-      if (to_selected_wood_dispenser > CLICK_DIST_UNSELECT) {
-        state.mode = Mode_View;
-        state.wood_dispenser_selected = 0;
-      }
-      if (to_selected_wood_dispenser < CLICK_DIST_SELECT) {
-        state.mode = Mode_WoodDispenserMove;
-      }
-    } break;
-
-    case (Mode_BuyPreview): { /* hi (see ui) */ } break;
-
-    case (Mode_WoodDispenserMove):
-    case (Mode_HandMoveAngleGrab):
-    case (Mode_HandMoveAngleRelease):
-    case (Mode_HandMove): {
-      /* hi */
-    } break;
-
-  }
-
-  ui(1);
+  ui(double_click ? UiEvent_DoubleClick : UiEvent_Mousedown);
 }
 
 WASM_EXPORT uint8_t *init(int width, int height) {
@@ -1391,220 +1317,38 @@ SKIP:
             (Color) { 128, 200, 128, 255 });
 
 
-  Hand *near_mouse_hand = 0;
-  float to_near_mouse_hand = 0;
-  find_nearest_hand(env.mouse_x, env.mouse_y, &near_mouse_hand, &to_near_mouse_hand);
+  ToolKind nearest_tool_kind;
+  // float to_nearest_tool = 0;
+  Hand *nearest_hand = 0;
+  WoodDispenser *nearest_wood_dispenser = 0;
+  {
+    float to_nearest_hand = 0;
+    float to_nearest_wood_dispenser = 0;
+    float x = env.mouse_x;
+    float y = env.mouse_y;
+    find_nearest_hand(x, y, &nearest_hand, &to_nearest_hand);
+    find_nearest_wood_dispenser(x, y, &nearest_wood_dispenser, &to_nearest_wood_dispenser);
+    nearest_tool_kind = (to_nearest_wood_dispenser < to_nearest_hand) ? ToolKind_WoodDispenser : ToolKind_Hand;
+    // to_nearest_tool = (to_nearest_wood_dispenser < to_nearest_hand) ? to_nearest_wood_dispenser : to_nearest_hand;
+  }
   for (int i = 0; i < ARR_LEN(state.hands); i++) {
     Hand *hand = state.hands + i;
     if (hand->stage == HandStage_Uninit) continue;
+    if (nearest_tool_kind == ToolKind_Hand && nearest_hand == hand) continue;
+    if (state.hand_selected == hand) continue;
 
     HandOut hando = {0};
     hand_out(hand, state.tick, &hando);
-    Color body_clr = {  85,  75, 100, 255 };
-
-    switch (state.mode) {
-      case (Mode_View): {
-        if (hand == near_mouse_hand && to_near_mouse_hand < CLICK_DIST_SELECT)
-          body_clr = (Color) { 185,  75,  55, 255 };
-      } break;
-
-      case (Mode_HandView): {
-        if (hand != state.hand_selected) break;
-
-        body_clr = (Color) { 215,  50,   0, 255 };
-
-        {
-          float x = hando.x;
-          float y = hando.y;
-          plot_line(x-0.1, y-0.0, x+0.1, y+0.0, body_clr);
-          plot_line(x-0.0, y-0.1, x+0.0, y+0.1, body_clr);
-
-          HandOut arc = hando;
-          Color arc_clr = { 205, 140, 205, 255 };
-          arc.theta = hando.angle_grab;
-          arc.grip_width = GRIP_WIDTH_GRAB;
-          draw_hand(&arc, arc_clr);
-          {
-            Color clr = arc_clr;
-            float _x = x + cosf(arc.angle_grab);
-            float _y = y + sinf(arc.angle_grab);
-            if (mag(_x - env.mouse_x, _y - env.mouse_y) < CLICK_DIST_SELECT)
-              clr.g = 0, clr.b = 0;
-            plot_line(_x-0.1, _y-0.0, _x+0.1, _y+0.0, clr);
-            plot_line(_x-0.0, _y-0.1, _x+0.0, _y+0.1, clr);
-          }
-
-          arc.theta = hando.angle_release;
-          arc.grip_width = GRIP_WIDTH_RELEASE;
-          draw_hand(&arc, arc_clr);
-          {
-            Color clr = arc_clr;
-            float _x = x + cosf(arc.angle_release);
-            float _y = y + sinf(arc.angle_release);
-            if (mag(_x - env.mouse_x, _y - env.mouse_y) < CLICK_DIST_SELECT)
-              clr.g = 0, clr.b = 0;
-            plot_line(_x-0.1, _y-0.0, _x+0.1, _y+0.0, clr);
-            plot_line(_x-0.0, _y-0.1, _x+0.0, _y+0.1, clr);
-          }
-        }
-
-        if (to_near_mouse_hand > CLICK_DIST_UNSELECT)
-          body_clr = (Color) { 180,  85,   0, 255 };
-        if (to_near_mouse_hand < CLICK_DIST_SELECT)
-          body_clr = (Color) { 255,   0,   0, 255 };
-      } break;
-
-      case (Mode_HandMoveAngleGrab): {
-        if (hand != state.hand_selected) break;
-
-        float x = hando.x;
-        float y = hando.y;
-        plot_line(x-0.1, y-0.0, x+0.1, y+0.0, (Color) { 255, 0, 0, 255 });
-        plot_line(x-0.0, y-0.1, x+0.0, y+0.1, (Color) { 255, 0, 0, 255 });
-
-        HandOut arc = hando;
-
-        {
-          Color arc_clr = { 140, 205, 185, 255 };
-          arc.theta = atan2f(env.mouse_y - y, env.mouse_x - x);
-          arc.grip_width = GRIP_WIDTH_GRAB;
-          draw_hand(&arc, arc_clr);
-        }
-
-        {
-          Color arc_clr = { 205, 140, 205, 255 };
-          arc.theta = hando.angle_release;
-          arc.grip_width = GRIP_WIDTH_RELEASE;
-          draw_hand(&arc, arc_clr);
-        }
-      } break;
-
-      case (Mode_HandMoveAngleRelease): {
-        if (hand != state.hand_selected) break;
-
-        float x = hando.x;
-        float y = hando.y;
-        plot_line(x-0.1, y-0.0, x+0.1, y+0.0, (Color) { 255, 0, 0, 255 });
-        plot_line(x-0.0, y-0.1, x+0.0, y+0.1, (Color) { 255, 0, 0, 255 });
-
-        HandOut arc = hando;
-
-        {
-          Color arc_clr = { 205, 140, 205, 255 };
-          arc.theta = hando.angle_grab;
-          arc.grip_width = GRIP_WIDTH_GRAB;
-          draw_hand(&arc, arc_clr);
-        }
-
-        {
-          Color arc_clr = { 140, 205, 185, 255 };
-          arc.theta = atan2f(env.mouse_y - y, env.mouse_x - x);
-          arc.grip_width = GRIP_WIDTH_RELEASE;
-          draw_hand(&arc, arc_clr);
-        }
-      } break;
-
-      case (Mode_HandMove): {
-        if (hand != state.hand_selected) break;
-
-        body_clr = (Color) {  80, 195,  80, 255 };
-
-        HandOut arc = hando;
-        arc.x = env.mouse_x;
-        arc.y = env.mouse_y;
-
-        Color arc_clr = { 140, 205, 185, 255 };
-        arc.theta = hando.angle_grab;
-        arc.grip_width = GRIP_WIDTH_GRAB;
-        draw_hand(&arc, arc_clr);
-
-        arc.theta = hando.angle_release;
-        arc.grip_width = GRIP_WIDTH_RELEASE;
-        draw_hand(&arc, arc_clr);
-      } break;
-
-      case (Mode_BuyPreview): {
-        if (state.preview_tool_kind == ToolKind_WoodDispenser) {
-          WoodDispenserOut wdo = {0};
-          wood_dispenser_out(
-            &(WoodDispenser) { .x = env.mouse_x,
-                               .y = env.mouse_y,
-                               .tick_stage_start = state.tick-TICK_SECOND,
-                               .tick_stage_end   = state.tick+1,
-                               .stage = WoodDispenserStage_Spawning },
-            state.tick,
-            &wdo
-          );
-          rendr.alpha = 0.3f;
-          draw_wood_dispenser(&wdo);
-          rendr.alpha = 1.0f;
-        }
-        if (state.preview_tool_kind == ToolKind_Hand) {
-          HandOut ghost = {0};
-          hand_out(
-            &(Hand) { .x = env.mouse_x,
-                      .y = env.mouse_y,
-                      .tick_stage_start = state.tick-TICK_SECOND,
-                      .tick_stage_end   = state.tick+1,
-                      .stage = HandStage_Grab },
-            state.tick,
-            &ghost
-          );
-          draw_hand(&ghost, (Color) { 120, 185, 120, 255 });
-        }
-      } break;
-
-      case (Mode_WoodDispenserView): {} break;
-      case (Mode_WoodDispenserMove): {} break;
-    }
-
-    draw_hand(&hando, body_clr);
+    draw_hand(&hando, clr_hand);
   }
-
-  if (state.mode == Mode_HandMove) {
-    HandOut ghost = {0};
-    hand_out(state.hand_selected, state.tick, &ghost);
-    ghost.x = env.mouse_x;
-    ghost.y = env.mouse_y;
-    draw_hand(&ghost, (Color) { 120, 185, 120, 255 });
-  }
-
-  WoodDispenser *near_mouse_wood_dispenser = 0;
-  float to_near_mouse_wood_dispenser = 0;
-  find_nearest_wood_dispenser(env.mouse_x, env.mouse_y, &near_mouse_wood_dispenser, &to_near_mouse_wood_dispenser);
   for (int i = 0; i < ARR_LEN(state.wood_dispensers); i++) {
     WoodDispenser *wd = state.wood_dispensers + i;
     if (wd->stage == WoodDispenserStage_Uninit) continue;
-
-    if (state.mode == Mode_View)
-      if (wd == near_mouse_wood_dispenser && to_near_mouse_wood_dispenser < CLICK_DIST_SELECT)
-        rendr.alpha = 0.5f;
-    if (state.mode == Mode_WoodDispenserView) {
-      float x = wd->x;
-      float y = wd->y;
-      plot_line(x-0.1, y-0.0, x+0.1, y+0.0, (Color) { 255, 0, 0, 255 });
-      plot_line(x-0.0, y-0.1, x+0.0, y+0.1, (Color) { 255, 0, 0, 255 });
-
-      if (to_near_mouse_wood_dispenser < CLICK_DIST_SELECT)
-        rendr.alpha = 0.30f;
-      else
-        rendr.alpha = 0.75f;
-    }
-    if (state.mode == Mode_WoodDispenserMove) {
-      rendr.alpha = 0.35f;
-      WoodDispenserOut wdo = {0};
-      wood_dispenser_out(wd, state.tick, &wdo);
-      wdo.x = env.mouse_x;
-      wdo.y = env.mouse_y;
-      draw_wood_dispenser(&wdo);
-      rendr.alpha = 1.00f;
-    }
+    if (nearest_tool_kind == ToolKind_WoodDispenser && nearest_wood_dispenser == wd) continue;
 
     WoodDispenserOut wdo = {0};
     wood_dispenser_out(wd, state.tick, &wdo);
     draw_wood_dispenser(&wdo);
-
-    rendr.alpha = 1;
   }
 
   /* draw boards (all of 'em!) */
@@ -1815,11 +1559,352 @@ SKIP:
     }
   }
 
-  ui(0);
-
+  ui(UiEvent_Render);
 }
 
-static void ui(int mousedown) {
+static void ui(UiEvent event) {
+  int mousedown = event == UiEvent_Mousedown || event == UiEvent_DoubleClick;
+  int double_click = event == UiEvent_DoubleClick;
+  int render = event == UiEvent_Render;
+
+  float x = env.mouse_x;
+  float y = env.mouse_y;
+
+  ToolKind nearest_tool_kind;
+  float to_nearest_tool = 0;
+  Hand *nearest_hand = 0;
+  WoodDispenser *nearest_wood_dispenser = 0;
+  {
+    float to_nearest_hand = 0;
+    float to_nearest_wood_dispenser = 0;
+    find_nearest_hand(x, y, &nearest_hand, &to_nearest_hand);
+    find_nearest_wood_dispenser(x, y, &nearest_wood_dispenser, &to_nearest_wood_dispenser);
+    nearest_tool_kind = (to_nearest_wood_dispenser < to_nearest_hand) ? ToolKind_WoodDispenser : ToolKind_Hand;
+    to_nearest_tool = (to_nearest_wood_dispenser < to_nearest_hand) ? to_nearest_wood_dispenser : to_nearest_hand;
+  }
+
+  int override = 0;
+  switch (state.mode) {
+    case (Mode_View): {
+      if (to_nearest_tool < CLICK_DIST_SELECT) {
+        if (nearest_tool_kind == ToolKind_Hand) {
+          if (double_click) {
+            state.hand_selected = nearest_hand;
+            state.mode = Mode_HandView;
+          }
+          if (render) {
+            override = 1;
+            HandOut hando = {0};
+            hand_out(nearest_hand, state.tick, &hando);
+            draw_hand(&hando, (Color) { 185,  75,  55, 255 });
+          }
+        }
+        if (nearest_tool_kind == ToolKind_WoodDispenser) {
+          if (double_click) {
+            state.wood_dispenser_selected = nearest_wood_dispenser;
+            state.mode = Mode_WoodDispenserView;
+          }
+          if (render) {
+            override = 1;
+            WoodDispenserOut wdo = {0};
+            wood_dispenser_out(nearest_wood_dispenser, state.tick, &wdo);
+            rendr.alpha = 0.5f;
+            draw_wood_dispenser(&wdo);
+            rendr.alpha = 1.0f;
+          }
+        }
+      }
+    } break;
+
+    case (Mode_HandView): {
+      Color body_clr = { 215,  50,   0, 255 };
+
+      Hand *hand = state.hand_selected;
+      float to_selected_hand = mag(hand->x - env.mouse_x,
+                                   hand->y - env.mouse_y);
+
+      float    to_angle_grab = mag((hand->x + cosf(hand->   angle_grab)) - x,
+                                   (hand->y + sinf(hand->   angle_grab)) - y);
+      if (to_angle_grab < CLICK_DIST_SELECT) {
+        if (mousedown) {
+          state.mode = Mode_HandMoveAngleGrab;
+          break;
+        }
+      }
+
+      float to_angle_release = mag((hand->x + cosf(hand->      angle_release)) - x,
+                                   (hand->y + sinf(hand->      angle_release)) - y);
+      if (to_angle_release < CLICK_DIST_SELECT) {
+        if (mousedown) {
+          state.mode = Mode_HandMoveAngleRelease;
+          break;
+        }
+      }
+
+      if (to_selected_hand > CLICK_DIST_UNSELECT) {
+        if (mousedown) {
+          state.mode = Mode_View;
+          state.hand_selected = 0;
+        }
+        if (render) 
+          body_clr = (Color) { 180,  85,   0, 255 };
+      }
+      if (to_selected_hand < CLICK_DIST_SELECT) {
+        if (mousedown) {
+          state.mode = Mode_HandMove;
+        }
+        if (render)
+          body_clr = (Color) { 255,   0,   0, 255 };
+      }
+
+      if (render) {
+        HandOut hando = {0};
+        hand_out(hand, state.tick, &hando);
+
+        float x = hando.x;
+        float y = hando.y;
+        plot_line(x-0.1, y-0.0, x+0.1, y+0.0, body_clr);
+        plot_line(x-0.0, y-0.1, x+0.0, y+0.1, body_clr);
+
+        HandOut arc = hando;
+        Color arc_clr = { 205, 140, 205, 255 };
+        arc.theta = hando.angle_grab;
+        arc.grip_width = GRIP_WIDTH_GRAB;
+        draw_hand(&arc, arc_clr);
+        {
+          Color clr = arc_clr;
+          float _x = x + cosf(arc.angle_grab);
+          float _y = y + sinf(arc.angle_grab);
+          if (mag(_x - env.mouse_x, _y - env.mouse_y) < CLICK_DIST_SELECT)
+            clr.g = 0, clr.b = 0;
+          plot_line(_x-0.1, _y-0.0, _x+0.1, _y+0.0, clr);
+          plot_line(_x-0.0, _y-0.1, _x+0.0, _y+0.1, clr);
+        }
+
+        arc.theta = hando.angle_release;
+        arc.grip_width = GRIP_WIDTH_RELEASE;
+        draw_hand(&arc, arc_clr);
+        {
+          Color clr = arc_clr;
+          float _x = x + cosf(arc.angle_release);
+          float _y = y + sinf(arc.angle_release);
+          if (mag(_x - env.mouse_x, _y - env.mouse_y) < CLICK_DIST_SELECT)
+            clr.g = 0, clr.b = 0;
+          plot_line(_x-0.1, _y-0.0, _x+0.1, _y+0.0, clr);
+          plot_line(_x-0.0, _y-0.1, _x+0.0, _y+0.1, clr);
+        }
+
+        // override = 0;
+        /* we want to override only to avoid us getting drawn twice */
+        if (nearest_tool_kind == ToolKind_Hand &&
+            nearest_hand == state.hand_selected )
+          override = 1;
+        draw_hand(&hando, body_clr);
+      }
+
+    } break;
+
+    case (Mode_WoodDispenserView): {
+      WoodDispenser *wood_dispenser = state.wood_dispenser_selected;
+      float to_selected_wood_dispenser = mag(wood_dispenser->x - env.mouse_x,
+                                             wood_dispenser->y - env.mouse_y);
+
+      if (to_selected_wood_dispenser > CLICK_DIST_UNSELECT) {
+        if (mousedown) {
+          state.mode = Mode_View;
+          state.wood_dispenser_selected = 0;
+        }
+      }
+      if (to_selected_wood_dispenser < CLICK_DIST_SELECT) {
+        if (mousedown) {
+          state.mode = Mode_WoodDispenserMove;
+        }
+      }
+      if (render) {
+        float x = wood_dispenser->x;
+        float y = wood_dispenser->y;
+        plot_line(x-0.1, y-0.0, x+0.1, y+0.0, (Color) { 255, 0, 0, 255 });
+        plot_line(x-0.0, y-0.1, x+0.0, y+0.1, (Color) { 255, 0, 0, 255 });
+      }
+    } break;
+
+    case (Mode_BuyPreview): {
+      if (state.preview_tool_kind == ToolKind_WoodDispenser) {
+        if (render) {
+          WoodDispenserOut wdo = {0};
+          wood_dispenser_out(
+            &(WoodDispenser) { .x = env.mouse_x,
+                               .y = env.mouse_y,
+                               .tick_stage_start = state.tick-TICK_SECOND,
+                               .tick_stage_end   = state.tick+1,
+                               .stage = WoodDispenserStage_Spawning },
+            state.tick,
+            &wdo
+          );
+          rendr.alpha = 0.3f;
+          draw_wood_dispenser(&wdo);
+          rendr.alpha = 1.0f;
+        }
+      }
+      if (state.preview_tool_kind == ToolKind_Hand) {
+        if (render) {
+          HandOut ghost = {0};
+          hand_out(
+            &(Hand) { .x = env.mouse_x,
+                      .y = env.mouse_y,
+                      .tick_stage_start = state.tick-TICK_SECOND,
+                      .tick_stage_end   = state.tick+1,
+                      .stage = HandStage_Grab },
+            state.tick,
+            &ghost
+          );
+          draw_hand(&ghost, (Color) { 120, 185, 120, 255 });
+        }
+      }
+    } break;
+
+    case (Mode_HandMoveAngleGrab): {
+      Hand *hand = state.hand_selected;
+      HandOut hando = {0};
+      hand_out(hand, state.tick, &hando);
+
+      float x = hando.x;
+      float y = hando.y;
+      plot_line(x-0.1, y-0.0, x+0.1, y+0.0, (Color) { 255, 0, 0, 255 });
+      plot_line(x-0.0, y-0.1, x+0.0, y+0.1, (Color) { 255, 0, 0, 255 });
+
+      HandOut arc = hando;
+
+      {
+        Color arc_clr = { 140, 205, 185, 255 };
+        arc.theta = atan2f(env.mouse_y - y, env.mouse_x - x);
+        arc.grip_width = GRIP_WIDTH_GRAB;
+        draw_hand(&arc, arc_clr);
+      }
+
+      {
+        Color arc_clr = { 205, 140, 205, 255 };
+        arc.theta = hando.angle_release;
+        arc.grip_width = GRIP_WIDTH_RELEASE;
+        draw_hand(&arc, arc_clr);
+      }
+    } break;
+
+    case (Mode_HandMoveAngleRelease): {
+      Hand *hand = state.hand_selected;
+      HandOut hando = {0};
+      hand_out(hand, state.tick, &hando);
+
+      float x = hando.x;
+      float y = hando.y;
+      plot_line(x-0.1, y-0.0, x+0.1, y+0.0, (Color) { 255, 0, 0, 255 });
+      plot_line(x-0.0, y-0.1, x+0.0, y+0.1, (Color) { 255, 0, 0, 255 });
+
+      HandOut arc = hando;
+
+      {
+        Color arc_clr = { 205, 140, 205, 255 };
+        arc.theta = hando.angle_grab;
+        arc.grip_width = GRIP_WIDTH_GRAB;
+        draw_hand(&arc, arc_clr);
+      }
+
+      {
+        Color arc_clr = { 140, 205, 185, 255 };
+        arc.theta = atan2f(env.mouse_y - y, env.mouse_x - x);
+        arc.grip_width = GRIP_WIDTH_RELEASE;
+        draw_hand(&arc, arc_clr);
+      }
+    } break;
+
+    case (Mode_WoodDispenserMove): {
+      WoodDispenserOut wdo = {0};
+      wood_dispenser_out(nearest_wood_dispenser, state.tick, &wdo);
+      rendr.alpha = 0.5;
+      wdo.x = env.mouse_x;
+      wdo.y = env.mouse_y;
+      draw_wood_dispenser(&wdo);
+      rendr.alpha = 1.0;
+    } break;
+
+    case (Mode_HandMove): {
+      Hand *hand = state.hand_selected;
+      HandOut hando = {0};
+      hand_out(hand, state.tick, &hando);
+
+      Color body_clr = {  80, 195,  80, 255 };
+
+      HandOut arc = hando;
+      arc.x = env.mouse_x;
+      arc.y = env.mouse_y;
+
+      override = 1;
+      draw_hand(&hando, body_clr);
+      draw_hand(&arc, body_clr);
+
+      Color arc_clr = { 140, 205, 185, 255 };
+      arc.theta = hando.angle_grab;
+      arc.grip_width = GRIP_WIDTH_GRAB;
+      draw_hand(&arc, arc_clr);
+
+      arc.theta = hando.angle_release;
+      arc.grip_width = GRIP_WIDTH_RELEASE;
+      draw_hand(&arc, arc_clr);
+    } break;
+  }
+
+  if (!override) {
+    if (nearest_hand != 0 &&
+        nearest_tool_kind == ToolKind_Hand) {
+      HandOut hando = {0};
+      hand_out(nearest_hand, state.tick, &hando);
+      draw_hand(&hando, clr_hand);
+    }
+    if (nearest_wood_dispenser != 0 &&
+        nearest_tool_kind == ToolKind_WoodDispenser) {
+      WoodDispenserOut wdo = {0};
+      wood_dispenser_out(nearest_wood_dispenser, state.tick, &wdo);
+      draw_wood_dispenser(&wdo);
+    }
+  }
+  /*
+    switch (state.mode) {
+
+      case (Mode_HandMove): {
+        if (hand != state.hand_selected) break;
+      } break;
+
+      case (Mode_WoodDispenserView): {} break;
+      case (Mode_WoodDispenserMove): {} break;
+    }
+
+    -- WOOD DISPENSER --
+
+    if (state.mode == Mode_View)
+      if (wd == near_mouse_wood_dispenser && to_near_mouse_wood_dispenser < CLICK_DIST_SELECT)
+        rendr.alpha = 0.5f;
+    if (state.mode == Mode_WoodDispenserView) {
+      float x = wd->x;
+      float y = wd->y;
+      plot_line(x-0.1, y-0.0, x+0.1, y+0.0, (Color) { 255, 0, 0, 255 });
+      plot_line(x-0.0, y-0.1, x+0.0, y+0.1, (Color) { 255, 0, 0, 255 });
+
+      if (to_near_mouse_wood_dispenser < CLICK_DIST_SELECT)
+        rendr.alpha = 0.30f;
+      else
+        rendr.alpha = 0.75f;
+    }
+    if (state.mode == Mode_WoodDispenserMove) {
+      rendr.alpha = 0.35f;
+      WoodDispenserOut wdo = {0};
+      wood_dispenser_out(wd, state.tick, &wdo);
+      wdo.x = env.mouse_x;
+      wdo.y = env.mouse_y;
+      draw_wood_dispenser(&wdo);
+      rendr.alpha = 1.00f;
+    } */
+
+
   {
     TextPopup tp = {
       .msg = "wood dispenser",
@@ -1831,8 +1916,9 @@ static void ui(int mousedown) {
     if (text_popup_hovered(&tp)) {
       text_popup_underline(&tp);
 
-      if (mousedown) state.mode = Mode_BuyPreview,
-                     state.preview_tool_kind = ToolKind_WoodDispenser;
+      if (mousedown)
+        state.mode = Mode_BuyPreview,
+        state.preview_tool_kind = ToolKind_WoodDispenser;
     }
 
     if (!text_popup_hovered(&tp)      &&
@@ -1885,4 +1971,3 @@ static void ui(int mousedown) {
     }
   }
 }
-
