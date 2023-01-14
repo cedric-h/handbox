@@ -2060,13 +2060,13 @@ static void ui(UiEvent event) {
     ) {
 
       WoodDispenser *wd = wood_dispenser_alloc();
-      if (!wd) return;
+      if (wd) {
+        wd->stage = WoodDispenserStage_Init;
+        wd->x = env.mouse_x;
+        wd->y = env.mouse_y;
 
-      wd->stage = WoodDispenserStage_Init;
-      wd->x = env.mouse_x;
-      wd->y = env.mouse_y;
-
-      state.mode = Mode_View;
+        state.mode = Mode_View;
+      }
     }
   }
 
@@ -2093,13 +2093,30 @@ static void ui(UiEvent event) {
         state.preview_tool_kind == ToolKind_Hand
     ) {
       Hand *hand = hand_alloc();
-      if (!hand) return;
 
-      hand->stage = HandStage_Init;
-      hand->x = env.mouse_x;
-      hand->y = env.mouse_y;
+      if (hand) {
+        hand->stage = HandStage_Init;
+        hand->x = env.mouse_x;
+        hand->y = env.mouse_y;
 
-      state.mode = Mode_View;
+        state.mode = Mode_View;
+      }
+    }
+  }
+
+  {
+    TextPopup tp = {
+      .msg = "reset",
+      .size = 0.028f,
+      .y = 0.05,
+      .x = 0.78f
+    };
+    text_popup_draw(&tp);
+    if (text_popup_hovered(&tp)) {
+      text_popup_underline(&tp);
+
+      if (mousedown)
+        state = (State){0};
     }
   }
 }
