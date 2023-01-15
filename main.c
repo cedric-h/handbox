@@ -210,7 +210,7 @@ int line_intersection(
   return 0; // No collision
 }
 
-static float point_on_line(float *p_x, float *p_y,
+static void point_on_line(float *p_x, float *p_y,
                            float l0_x, float l0_y,
                            float l1_x, float l1_y) {
   float line_len = (l1_x - l0_x)*(l1_x - l0_x) +
@@ -224,7 +224,7 @@ static float point_on_line(float *p_x, float *p_y,
   *p_x = l0_x + (U * (l1_x - l0_x));
   *p_y = l0_y + (U * (l1_y - l0_y));
 
-  return 0.5f;
+  return;
 }
 static float point_to_line(float  p_x, float  p_y,
                            float l0_x, float l0_y,
@@ -602,6 +602,15 @@ typedef struct {
 */
 
 typedef enum {
+  LemmingStage_Uninit,
+  LemmingStage_Init,
+} LemmingStage;
+typedef struct {
+  LemmingStage stage;
+  float x, dx;
+} Lemming;
+
+typedef enum {
   Mode_View,
   Mode_HandView,
   Mode_HandMoveAngleGrab,
@@ -624,6 +633,7 @@ typedef struct {
   WoodDispenser wood_dispensers[1 << 4];
   Board boards[1 << 5];
   House houses[1 << 4];
+  Lemming lemmings[1 << 6];
 
 } State;
 static void lo_ve_state(LoVeEnv *lenv, State *state) {
@@ -826,6 +836,16 @@ static Hand *hand_alloc(void) {
   for (int i = 0; i < ARR_LEN(state.hands); i++) {
     Hand *b = state.hands + i;
     if (b->stage == HandStage_Uninit) {
+      __builtin_memset(b, 0, sizeof(*b));
+      return b;
+    }
+  }
+  return 0;
+}
+static Lemming *lemming_alloc(void) {
+  for (int i = 0; i < ARR_LEN(state.lemmings); i++) {
+    Lemming *b = state.lemmings + i;
+    if (b->stage == LemmingStage_Uninit) {
       __builtin_memset(b, 0, sizeof(*b));
       return b;
     }
@@ -1290,7 +1310,7 @@ static void structure_test(Board *head) {
     float cy = (tri[1].y + tri[2].y) / 2;
     float area = mag(tri[1].x - tri[2].x, tri[1].y - tri[2].y) *
                  mag(tri[0].x -       cx, tri[0].y -       cy) * 0.5f;
-    print(area);
+    // print(area);
 
     if (area < 0.35f) return;
   }
@@ -1425,6 +1445,56 @@ SKIP:
   plot_line(-10.0f, 0.0f,
              10.0f, 0.0f,
             (Color) { 128, 200, 128, 255 });
+
+  int lemcount = 0;
+  int housecount = 0;
+  for (int i = 0; i < ARR_LEN(state.lemmings); i++) {
+    Lemming *lem = state.lemmings + i;
+    if (lem->stage == LemmingStage_Uninit) continue;
+    lemcount++;
+  }
+  for (int i = 0; i < ARR_LEN(state.houses); i++) {
+    House *h = state.houses + i;
+    if (h->stage == HouseStage_Uninit) continue;
+    housecount++;
+  }
+  while (lemcount < housecount)
+    lemcount++, lemming_alloc()->stage = LemmingStage_Init;
+
+  for (int i = 0; i < ARR_LEN(state.lemmings); i++) {
+    Lemming *lem = state.lemmings + i;
+    if (lem->stage == LemmingStage_Uninit) continue;
+    lem->x += 0.005;
+
+    float x = lem->x;
+    float y = 0.5 * abs(cosf(2*elapsed));
+
+    /* quadratic perf goes weeee */
+    for (int i = 0; i < ARR_LEN(state.houses); i++) {
+      House *h = state.houses + i;
+      if (h->stage == HouseStage_Uninit) continue;
+
+      Board *b0 = h->boards + 0;
+      float to_b0 = point_to_line(x, y, b0->beg_x, b0->beg_y, b0->end_x, b0->end_y);
+      Board *b1 = h->boards + 1;
+      float to_b1 = point_to_line(x, y, b1->beg_x, b1->beg_y, b1->end_x, b1->end_y);
+
+      if (to_b0 < 0.015 || to_b1 < 0.015) {
+        h->stage = HouseStage_Uninit;
+        lem->stage = LemmingStage_Uninit;
+        break;
+      }
+    }
+  }
+  for (int i = 0; i < ARR_LEN(state.lemmings); i++) {
+    Lemming *lem = state.lemmings + i;
+    if (lem->stage == LemmingStage_Uninit) continue;
+
+    float x = lem->x;
+    float y = 0.5 * abs(cosf(2*elapsed));
+    plot_line(x-0.1, y-0.0, x+0.1, y+0.0, (Color) { 255, 0, 0, 255 });
+    plot_line(x-0.0, y-0.1, x+0.0, y+0.1, (Color) { 255, 0, 0, 255 });
+  }
 
 
   ToolKind nearest_tool_kind;
